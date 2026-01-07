@@ -4,6 +4,17 @@ import frappe
 import frappe.utils
 
 
+def get_attachments_data(email):
+    attachments_data = json.loads(email.attachments_data)
+    # instead of using file_url from attachments_data, we have to use frappe.get_value to get the latest file_url
+    for attachment in attachments_data:
+        file_doc_name = attachment.get("file_doc_name")
+        if file_doc_name:
+            file_url = frappe.db.get_value("File", file_doc_name, "file_url")
+            attachment["file_url"] = file_url
+    return attachments_data
+
+
 @frappe.whitelist()
 def get_linked_gmail_threads(doctype, docname):
     gmail_threads = frappe.get_all(
@@ -49,7 +60,7 @@ def get_linked_gmail_threads(doctype, docname):
                         "read_by_recipient": email.read_by_recipient,
                         "rating": 0,  # TODO: add rating
                         "recipients": email.recipients,
-                        "attachments": json.loads(email.attachments_data),
+                        "attachments": get_attachments_data(email),
                         "_url": thread.get_url(),
                         "_doc_status": (
                             "Sent" if email.sent_or_received == "Sent" else "Received"
