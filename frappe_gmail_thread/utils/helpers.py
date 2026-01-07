@@ -208,7 +208,6 @@ def process_attachments(new_email, gmail_thread, email_object):
                 {
                     "file_name": _file.file_name,
                     "file_doc_name": _file.name,
-                    "file_url": _file.file_url,
                     "is_private": _file.is_private,
                 }
             )
