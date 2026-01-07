@@ -127,10 +127,13 @@ def create_new_email(email, gmail_account):
         pass
 
     def safe_str(val):
-        # Ensure string is safe for DB, replace surrogates and invalid chars
+        if val is None:
+            return ""
+        if isinstance(val, bytes):
+            return val.decode("utf-8", errors="replace")
         if isinstance(val, str):
-            return val.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
-        return val
+            return val.encode("utf-8", errors="replace").decode("utf-8")
+        return str(val)
 
     new_email = frappe.new_doc("Single Email CT")
     new_email.gmail_message_id = safe_str(email["id"])
