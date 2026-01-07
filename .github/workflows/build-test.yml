@@ -3,13 +3,16 @@ name: Bench Build Test
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.repository }}-${{ github.event.number }}
   cancel-in-progress: true
 
 jobs:
   Bench-Build-Test:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     container:
       image: docker.io/frappe/bench:latest
       options: --user root
