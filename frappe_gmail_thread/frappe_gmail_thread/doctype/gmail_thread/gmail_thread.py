@@ -115,6 +115,15 @@ def sync_labels(account_name, should_save=True):
         gmail_account.save(ignore_permissions=True)
 
 
+def _batch_commit_if_needed(emails_processed, gmail_account, max_history_id):
+    """Commit database changes in batches for performance optimization."""
+    if emails_processed % BATCH_COMMIT_SIZE == 0:
+        gmail_account.reload()
+        gmail_account.last_historyid = max_history_id
+        gmail_account.save(ignore_permissions=True)
+        frappe.db.commit()
+
+
 def sync(user=None):
     if user:
         frappe.set_user(user)
@@ -223,14 +232,10 @@ def sync(user=None):
                         gmail_thread.save(ignore_permissions=True)
                         emails_processed += 1
 
-                        # Batch commit every BATCH_COMMIT_SIZE emails
-                        if emails_processed % BATCH_COMMIT_SIZE == 0:
-                            frappe.db.commit()
-                            # Update history ID periodically for crash recovery
-                            gmail_account.reload()
-                            gmail_account.last_historyid = max_history_id
-                            gmail_account.save(ignore_permissions=True)
-                            frappe.db.commit()
+                        # Batch commit every BATCH_COMMIT_SIZE emails for performance
+                        _batch_commit_if_needed(
+                            emails_processed, gmail_account, max_history_id
+                        )
 
                         frappe.db.set_value(
                             "Gmail Thread",
@@ -355,14 +360,10 @@ def sync(user=None):
                             gmail_thread.save(ignore_permissions=True)
                             emails_processed += 1
 
-                            # Batch commit every BATCH_COMMIT_SIZE emails
-                            if emails_processed % BATCH_COMMIT_SIZE == 0:
-                                frappe.db.commit()
-                                # Update history ID periodically for crash recovery
-                                gmail_account.reload()
-                                gmail_account.last_historyid = max_history_id
-                                gmail_account.save(ignore_permissions=True)
-                                frappe.db.commit()
+                            # Batch commit every BATCH_COMMIT_SIZE emails for performance
+                            _batch_commit_if_needed(
+                                emails_processed, gmail_account, max_history_id
+                            )
 
                             frappe.db.set_value(
                                 "Gmail Thread",
