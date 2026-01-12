@@ -117,7 +117,7 @@ def sync_labels(account_name, should_save=True):
 
 def _batch_commit_if_needed(emails_processed, gmail_account, max_history_id):
     """Commit database changes in batches for performance optimization."""
-    if emails_processed % BATCH_COMMIT_SIZE == 0:
+    if emails_processed > 0 and emails_processed % BATCH_COMMIT_SIZE == 0:
         gmail_account.reload()
         gmail_account.last_historyid = max_history_id
         gmail_account.save(ignore_permissions=True)
