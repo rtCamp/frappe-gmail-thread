@@ -55,7 +55,7 @@ def get_linked_gmail_threads(doctype, docname):
 
     # Batch fetch all emails for all threads
     all_emails = frappe.get_all(
-        "Single Email CT",  # Child table DocType
+        "Single Email CT",  # Gmail Thread Email child table DocType
         filters={"parent": ["in", thread_names]},
         fields=[
             "name",
