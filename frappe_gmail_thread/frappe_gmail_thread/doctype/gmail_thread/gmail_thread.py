@@ -19,6 +19,7 @@ from frappe_gmail_thread.utils.helpers import (
 )
 
 SCOPES = "https://www.googleapis.com/auth/gmail.readonly"
+BATCH_COMMIT_SIZE = 20  # Commit every N emails for performance optimization
 
 
 class GmailThread(Document):
@@ -114,6 +115,15 @@ def sync_labels(account_name, should_save=True):
         gmail_account.save(ignore_permissions=True)
 
 
+def _batch_commit_if_needed(emails_processed, gmail_account, max_history_id):
+    """Commit database changes in batches for performance optimization."""
+    if emails_processed > 0 and emails_processed % BATCH_COMMIT_SIZE == 0:
+        gmail_account.reload()
+        gmail_account.last_historyid = max_history_id
+        gmail_account.save(ignore_permissions=True)
+        frappe.db.commit()
+
+
 def sync(user=None):
     if user:
         frappe.set_user(user)
@@ -133,6 +143,7 @@ def sync(user=None):
     # Always store the maximum history id seen, to avoid skipping emails
     last_history_id = int(gmail_account.last_historyid or 0)
     max_history_id = last_history_id
+    emails_processed = 0  # Track emails for batch commits
 
     for label_id in label_ids:
         try:
@@ -219,7 +230,13 @@ def sync(user=None):
                         replace_inline_images(email, email_object)
                         gmail_thread.append("emails", email)
                         gmail_thread.save(ignore_permissions=True)
-                        frappe.db.commit()  # nosemgrep
+                        emails_processed += 1
+
+                        # Batch commit every BATCH_COMMIT_SIZE emails for performance
+                        _batch_commit_if_needed(
+                            emails_processed, gmail_account, max_history_id
+                        )
+
                         frappe.db.set_value(
                             "Gmail Thread",
                             gmail_thread.name,
@@ -341,6 +358,13 @@ def sync(user=None):
                             replace_inline_images(email, email_object)
                             gmail_thread.append("emails", email)
                             gmail_thread.save(ignore_permissions=True)
+                            emails_processed += 1
+
+                            # Batch commit every BATCH_COMMIT_SIZE emails for performance
+                            _batch_commit_if_needed(
+                                emails_processed, gmail_account, max_history_id
+                            )
+
                             frappe.db.set_value(
                                 "Gmail Thread",
                                 gmail_thread.name,
@@ -378,6 +402,7 @@ def sync(user=None):
                             docname=docname,
                         )
         except Exception:
+            frappe.db.rollback()
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")
             continue
 
