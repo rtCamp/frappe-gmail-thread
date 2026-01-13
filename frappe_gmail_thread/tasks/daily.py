@@ -14,7 +14,9 @@ def enable_pubsub_everyday():
         return
 
     gmail_accounts = frappe.get_all(
-        "Gmail Account", filters={"gmail_enabled": 1}, fields=["name"]
+        "Gmail Account",
+        filters={"gmail_enabled": 1, "refresh_token": ["is", "set"]},
+        fields=["name"],
     )
     for gmail_account in gmail_accounts:
         gaccount = frappe.get_doc("Gmail Account", gmail_account.name)
