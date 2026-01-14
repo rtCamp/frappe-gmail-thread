@@ -262,16 +262,20 @@ def sync(user=None):
                         .execute()
                     )
                 except googleapiclient.errors.HttpError as e:
-                    # If notFound, update historyid to the value returned by API (if any)
-                    # You won't find history id in error, so just reset to 0 and let next sync do initial sync
+                    skip_label = False
                     if hasattr(e, "error_details"):
                         for error in e.error_details:
                             if error.get("reason") == "notFound":
-                                gmail_account.last_historyid = 0
-                                gmail_account.save(ignore_permissions=True)
-                                frappe.db.commit()
-                                return
-                    raise e
+                                skip_label = True
+                                # Label does not exist, skip it
+                                if label_id in gmail_account.label_ids:
+                                    gmail_account.label_ids.remove(label_id)
+                                    gmail_account.save(ignore_permissions=True)
+                                    frappe.db.commit()
+                    if skip_label:
+                        # Skip this missing label and continue with the next one
+                        continue # Continue outer loop for next label
+                    raise e             
 
                 new_history_id = int(history.get("historyId", last_history_id))
                 if new_history_id > max_history_id:
