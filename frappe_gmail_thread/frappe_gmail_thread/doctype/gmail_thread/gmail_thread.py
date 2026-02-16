@@ -275,7 +275,7 @@ def sync(user=None):
                                 break
                     if skip_label:
                         # Skip this missing label and continue with the next one
-                        continue # Continue outer loop for next label
+                        continue
                     raise e
 
                 new_history_id = int(history.get("historyId", last_history_id))
