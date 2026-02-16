@@ -272,6 +272,7 @@ def sync(user=None):
                                     gmail_account.label_ids.remove(label_id)
                                     gmail_account.save(ignore_permissions=True)
                                     frappe.db.commit()
+                                break
                     if skip_label:
                         # Skip this missing label and continue with the next one
                         continue # Continue outer loop for next label
