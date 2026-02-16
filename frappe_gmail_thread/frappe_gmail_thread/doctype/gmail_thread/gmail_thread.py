@@ -262,6 +262,7 @@ def sync(user=None):
                         .execute()
                     )
                 except googleapiclient.errors.HttpError as e:
+
                     skip_label = False
                     if hasattr(e, "error_details"):
                         for error in e.error_details:
@@ -277,6 +278,34 @@ def sync(user=None):
                         # Skip this missing label and continue with the next one
                         continue
                     raise e
+
+                    if hasattr(e, "resp") and e.resp.status == 404:
+                        try:
+                            # Check if label still exists
+                            gmail.users().labels().get(
+                                userId="me", id=label_id
+                            ).execute()
+
+                            # If label exists → historyId likely expired
+                            gmail_account.last_historyid = 0
+                            gmail_account.save(ignore_permissions=True)
+                            frappe.db.commit()
+                            return
+                        except googleapiclient.errors.HttpError:
+                            # Label truly does not exist → remove it safely
+                            removed = False
+                            for label in getattr(gmail_account, "labels", []):
+                                if getattr(label, "label_id", None) == label_id:
+                                    gmail_account.labels.remove(label)
+                                    removed = True
+                                    break
+                            if removed:
+                                gmail_account.save(ignore_permissions=True)
+                                frappe.db.commit()
+
+                            continue
+
+                    raise
 
                 new_history_id = int(history.get("historyId", last_history_id))
                 if new_history_id > max_history_id:
@@ -411,7 +440,9 @@ def get_permission_query_conditions(user):
             select parent from `tabInvolved User`
             where account = {user}
         ) or `tabGmail Thread`.owner = {user}
-    """.format(user=frappe.db.escape(user))
+    """.format(
+        user=frappe.db.escape(user)
+    )
 
 
 def has_permission(doc, ptype, user):
