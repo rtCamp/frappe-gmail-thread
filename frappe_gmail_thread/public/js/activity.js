@@ -8,7 +8,7 @@ function page_changed(event) {
     if (route[0] == "Form") {
       frappe.ui.form.on(route[1], {
         refresh: function (frm) {
-          if ( frm.timeline && frm.timeline.doc_info && frm.timeline.doc_info.additional_timeline_content) {
+          if (frm.timeline && frm.timeline.doc_info && frm.timeline.doc_info.additional_timeline_content) {
             let gthread_users = new Set();
             for (let activity of frm.timeline.doc_info.additional_timeline_content) {
               if (activity.doctype === "Gmail Thread") {
