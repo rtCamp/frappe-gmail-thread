@@ -8,7 +8,11 @@ function page_changed(event) {
     if (route[0] == "Form") {
       frappe.ui.form.on(route[1], {
         refresh: function (frm) {
-          if (frm.timeline.doc_info.additional_timeline_content) {
+          if (
+            frm.timeline &&
+            frm.timeline.doc_info &&
+            frm.timeline.doc_info.additional_timeline_content
+          ) {
             let gthread_users = new Set();
             for (let activity of frm.timeline.doc_info.additional_timeline_content) {
               if (activity.doctype === "Gmail Thread") {
@@ -27,12 +31,15 @@ function page_changed(event) {
                 const user_info = r.message;
                 if ($.isEmptyObject(user_info)) return;
                 frappe.update_user_info(user_info);
-                frm.timeline.refresh();
+                if(frm.timeline){
+                  frm.timeline.refresh();
+                }
               });
           }
           frappe.realtime.on("gthread_new_email", function (data) {
-            console.log("Received new email");
-            frm.timeline.refresh();
+            if(frm.timeline){
+              frm.timeline.refresh();
+            }
           });
         },
       });
