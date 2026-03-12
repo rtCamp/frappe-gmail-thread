@@ -91,7 +91,7 @@ class GmailThread(Document):
 
 
 @frappe.whitelist(methods=["POST"])
-def sync_labels(account_name: str | object, should_save: bool = True):
+def sync_labels(account_name: str | Document, should_save: bool = True):
     if isinstance(account_name, str):
         gmail_account = frappe.get_doc("Gmail Account", account_name)
     else:
