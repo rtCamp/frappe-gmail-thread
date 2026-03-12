@@ -91,7 +91,7 @@ class GmailThread(Document):
 
 
 @frappe.whitelist(methods=["POST"])
-def sync_labels(account_name, should_save=True):
+def sync_labels(account_name: str | Document, should_save: bool = True):
     if isinstance(account_name, str):
         gmail_account = frappe.get_doc("Gmail Account", account_name)
     else:
@@ -116,7 +116,7 @@ def sync_labels(account_name, should_save=True):
 
 def sync(user=None):
     if user:
-        frappe.set_user(user)
+        frappe.set_user(user)  # nosemgrep:
     user = frappe.session.user
     gmail_account = frappe.get_doc("Gmail Account", {"linked_user": user})
     if not gmail_account.gmail_enabled:

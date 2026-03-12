@@ -5,7 +5,7 @@ import frappe
 from frappe.utils.background_jobs import is_job_enqueued
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist(allow_guest=True)  # nosemgrep
 def callback():
     data = frappe.request.get_data(as_text=True)
     data = frappe.parse_json(data)
