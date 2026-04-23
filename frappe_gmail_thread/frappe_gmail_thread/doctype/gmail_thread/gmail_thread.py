@@ -89,6 +89,14 @@ class GmailThread(Document):
             elif self.status == "Linked":
                 self.status = "Open"
 
+        subjects = set()
+        if self.subject_of_first_mail:
+            subjects.add(self.subject_of_first_mail.strip())
+        for email in self.emails or []:
+            if email.subject:
+                subjects.add(email.subject.strip())
+        self.all_subjects = "\n".join(sorted(subjects))
+
 
 @frappe.whitelist(methods=["POST"])
 def sync_labels(account_name: str | Document, should_save: bool = True):
