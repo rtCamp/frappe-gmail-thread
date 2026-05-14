@@ -16,7 +16,7 @@ def get_attachments_data(email):
 
 
 @frappe.whitelist()
-def get_linked_gmail_threads(doctype, docname):
+def get_linked_gmail_threads(doctype: str, docname: str | int):
     gmail_threads = frappe.get_all(
         "Gmail Thread",
         filters={
@@ -83,7 +83,7 @@ def get_linked_gmail_threads(doctype, docname):
 
 
 @frappe.whitelist()
-def relink_gmail_thread(name, doctype, docname):
+def relink_gmail_thread(name: str | int, doctype: str, docname: str | int):
     thread = frappe.get_doc("Gmail Thread", name)
     thread.reference_doctype = doctype
     thread.reference_name = docname
@@ -92,7 +92,7 @@ def relink_gmail_thread(name, doctype, docname):
 
 
 @frappe.whitelist()
-def unlink_gmail_thread(name):
+def unlink_gmail_thread(name: str | int):
     thread = frappe.get_doc("Gmail Thread", name)
     thread.reference_doctype = None
     thread.reference_name = None
