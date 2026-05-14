@@ -13,8 +13,8 @@ class GmailInboundMail(Email):
     def __init__(self, content):
         super().__init__(content)
         # remove quoted replies from email text content
-        self.text_content = self.remove_quoted_replies(self.text_content, "text")
-        self.html_content = self.remove_quoted_replies(self.html_content, "html")
+        self.text_content = self.pop_down_quoted_replies(self.text_content, "text")
+        self.html_content = self.pop_down_quoted_replies(self.html_content, "html")
         self.set_content_and_type()
         self.set_to_and_cc()
 
@@ -29,15 +29,49 @@ class GmailInboundMail(Email):
                 )
         return content
 
-    def remove_quoted_replies(self, content, type):
+    # Canonical Gmail quote style applied to all normalised quote containers
+    _GMAIL_QUOTE_STYLE = "margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex"
+
+    def pop_down_quoted_replies(self, content, type):
         if type == "text":
             regex = r"(\n|^)(On(.|\n)*?wrote:)((.|\n)*)"
             return re.sub(regex, "", content)
         if type == "html":
+            if not content:
+                return content
+
             soup = BeautifulSoup(content, "html.parser")
-            # only works for gmail
-            for div in soup.find_all("div", class_="gmail_quote"):
-                div.decompose()
+
+            # Normalise every client's quote element to
+            # <div class="gmail_quote" style="..."> so the frontend renders
+            # them all identically with a left-border just like Gmail.
+            #
+            # Clients and their quote structures:
+            #   Gmail                    → blockquote.gmail_quote  (already correct, rewrap as div)
+            #   Gmail container          → div.gmail_quote_container (keep as-is, children handled)
+            #   Apple Mail/Thunderbird   → blockquote[type="cite"]
+            #   Outlook                  → div#divRplyFwdMsg, div.OutlookMessageHeader
+            #   Yahoo Mail               → div.yahoo_quoted
+            #   Frappe outgoing          → plain <blockquote style="...">
+
+            QUOTE_SELECTORS = [
+                "blockquote[type='cite']",
+                "div#divRplyFwdMsg",
+                "div.OutlookMessageHeader",
+                "div.yahoo_quoted",
+            ]
+
+            for selector in QUOTE_SELECTORS:
+                for node in soup.select(selector):
+                    new_div = soup.new_tag(
+                        "div",
+                        **{"class": "gmail_quote", "style": self._GMAIL_QUOTE_STYLE},
+                    )
+                    children = list(node.children)
+                    for child in children:
+                        new_div.append(child)
+                    node.replace_with(new_div)
+
             return str(soup)
 
     def set_to_and_cc(self):
