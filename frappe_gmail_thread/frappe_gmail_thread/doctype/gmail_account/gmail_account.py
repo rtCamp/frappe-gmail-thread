@@ -132,10 +132,15 @@ class GmailAccount(Document):
 
 
 @frappe.whitelist()  # nosemgrep
-def sync_labels_api(args):
-    args = json.loads(args)
-    doc = frappe.get_doc("Gmail Account", args.get("doc_name"))
-    if args.get("reset_historyid", False):
+def sync_labels_api(args: str | dict | None = None, doc_name: str | None = None):
+    if args:
+        if isinstance(args, str):
+            args = json.loads(args)
+        doc_name = doc_name or args.get("doc_name")
+    if not args and not doc_name:
+        frappe.throw(_("doc_name is required"))
+    doc = frappe.get_doc("Gmail Account", doc_name)
+    if args and args.get("reset_historyid", False):
         doc.last_historyid = 0
         doc.save()
         doc.reload()
