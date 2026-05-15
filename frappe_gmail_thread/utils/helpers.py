@@ -10,7 +10,9 @@ from frappe.utils import extract_email_id, sanitize_html
 
 
 class GmailInboundMail(Email):
-    def __init__(self, content):
+    def __init__(self, content, email_account=None):
+        self.email_account = email_account
+        self.email_account.attachment_limit = None
         super().__init__(content)
         # remove quoted replies from email text content
         self.text_content = self.pop_down_quoted_replies(self.text_content, "text")
@@ -126,8 +128,7 @@ def create_new_email(email, gmail_account):
     email_content = base64.urlsafe_b64decode(email["raw"].encode("ASCII")).decode(
         "utf-8", errors="replace"
     )
-    email_object = GmailInboundMail(content=email_content)
-    # check if email is sent or received
+    email_object = GmailInboundMail(content=email_content, email_account=gmail_account)
     is_sent = False
     # check if there is a user (not website user) with the same email as the sender in frappe, if yes, then it is a sent email
     is_sent = (
