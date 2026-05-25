@@ -17,7 +17,8 @@
   "column_break_cmhm",
   "gmail_account",
   "subject_of_first_mail",
-  "involved_users"
+  "involved_users",
+  "all_subjects"
  ],
  "fields": [
   {
@@ -95,6 +96,14 @@
    "label": "Status",
    "options": "Open\nClosed\nLinked",
    "reqd": 1
+  },
+  {
+   "fieldname": "all_subjects",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "All Subjects",
+   "read_only": 1,
+   "in_standard_filter": 1
   }
  ],
  "index_web_pages_for_search": 1,

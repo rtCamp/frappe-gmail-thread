@@ -20,7 +20,7 @@ def get_authentication_url(client_id=None, redirect_uri=None):
 
 
 @frappe.whitelist()
-def get_auth_url(doc):
+def get_auth_url(doc: str | int):
     current_user = frappe.session.user
     current_user = frappe.get_doc("User", current_user)
     try:
@@ -115,7 +115,7 @@ def authorize_access(user, code=None, reauthorize=None):
 
 
 @frappe.whitelist()
-def callback(code):
+def callback(code: str | int):
     """
     Authorization code is sent to callback as per the API configuration
     """
