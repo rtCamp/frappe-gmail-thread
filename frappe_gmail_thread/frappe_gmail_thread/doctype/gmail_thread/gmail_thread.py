@@ -270,16 +270,50 @@ def sync(user=None):
                         .execute()
                     )
                 except googleapiclient.errors.HttpError as e:
-                    # If notFound, update historyid to the value returned by API (if any)
-                    # You won't find history id in error, so just reset to 0 and let next sync do initial sync
+
+                    skip_label = False
                     if hasattr(e, "error_details"):
                         for error in e.error_details:
                             if error.get("reason") == "notFound":
-                                gmail_account.last_historyid = 0
+                                skip_label = True
+                                # Label does not exist, skip it
+                                if label_id in gmail_account.label_ids:
+                                    gmail_account.label_ids.remove(label_id)
+                                    gmail_account.save(ignore_permissions=True)
+                                    frappe.db.commit()
+                                break
+                    if skip_label:
+                        # Skip this missing label and continue with the next one
+                        continue
+                    raise e
+
+                    if hasattr(e, "resp") and e.resp.status == 404:
+                        try:
+                            # Check if label still exists
+                            gmail.users().labels().get(
+                                userId="me", id=label_id
+                            ).execute()
+
+                            # If label exists → historyId likely expired
+                            gmail_account.last_historyid = 0
+                            gmail_account.save(ignore_permissions=True)
+                            frappe.db.commit()
+                            return
+                        except googleapiclient.errors.HttpError:
+                            # Label truly does not exist → remove it safely
+                            removed = False
+                            for label in getattr(gmail_account, "labels", []):
+                                if getattr(label, "label_id", None) == label_id:
+                                    gmail_account.labels.remove(label)
+                                    removed = True
+                                    break
+                            if removed:
                                 gmail_account.save(ignore_permissions=True)
                                 frappe.db.commit()
-                                return
-                    raise e
+
+                            continue
+
+                    raise
 
                 new_history_id = int(history.get("historyId", last_history_id))
                 if new_history_id > max_history_id:
@@ -414,7 +448,9 @@ def get_permission_query_conditions(user):
             select parent from `tabInvolved User`
             where account = {user}
         ) or `tabGmail Thread`.owner = {user}
-    """.format(user=frappe.db.escape(user))
+    """.format(
+        user=frappe.db.escape(user)
+    )
 
 
 def has_permission(doc, ptype, user):
