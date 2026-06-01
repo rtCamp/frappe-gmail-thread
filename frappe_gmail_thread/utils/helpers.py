@@ -16,7 +16,7 @@ class GmailInboundMail(Email):
         if not hasattr(self.email_account, "attachment_limit"):
             self.email_account.attachment_limit = None
 
-        super().__init__(content, email_account=self.email_account)
+        super().__init__(content)
         self.text_content = self.pop_down_quoted_replies(self.text_content, "text")
         self.html_content = self.pop_down_quoted_replies(self.html_content, "html")
         self.set_content_and_type()
