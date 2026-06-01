@@ -1,9 +1,6 @@
 # Copyright (c) 2024, rtCamp and contributors
 # For license information, please see license.txt
 
-# import frappe
-import json
-
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -135,7 +132,7 @@ class GmailAccount(Document):
 def sync_labels_api(args: str | dict | None = None, doc_name: str | None = None):
     if args:
         if isinstance(args, str):
-            args = json.loads(args)
+            args = frappe.parse_json(args)
         doc_name = doc_name or args.get("doc_name")
     if not args and not doc_name:
         frappe.throw(_("doc_name is required"))

@@ -1,21 +1,34 @@
-import json
-
 import frappe
 import frappe.utils
+from frappe import _
 
 
 def get_attachments_data(email):
-    attachments_data = json.loads(email.attachments_data)
-    if not attachments_data:
+    raw_attachments = getattr(email, "attachments_data", None)
+    if not raw_attachments:
         return []
 
-    # Collect every referenced File name and resolve them in a single
-    # query — the earlier per-attachment frappe.db.get_value was N+1
-    # against tabFile.
+    if isinstance(raw_attachments, str):
+        try:
+            attachments_data = frappe.parse_json(raw_attachments)
+        except (TypeError, ValueError, frappe.ValidationError):
+            frappe.log_error(
+                title=_("Invalid Gmail attachments_data JSON"),
+                message=frappe.get_traceback(),
+            )
+            return []
+    elif isinstance(raw_attachments, list):
+        attachments_data = raw_attachments
+    else:
+        return []
+
+    if not attachments_data or not isinstance(attachments_data, list):
+        return []
+
     file_doc_names = {
-        a["file_doc_name"]
+        a.get("file_doc_name")
         for a in attachments_data
-        if a.get("file_doc_name")
+        if isinstance(a, dict) and a.get("file_doc_name")
     }
     file_url_by_name: dict[str, str] = {}
     if file_doc_names:
@@ -30,13 +43,12 @@ def get_attachments_data(email):
 
     valid: list[dict] = []
     for attachment in attachments_data:
+        if not isinstance(attachment, dict):
+            continue
         file_doc_name = attachment.get("file_doc_name")
         if file_doc_name:
             file_url = file_url_by_name.get(file_doc_name)
             if not file_url:
-                # File row was deleted (manual cleanup, expired temp,
-                # etc.). Skip — rendering it would crash the timeline
-                # template at `file_url.split("/")`.
                 continue
             attachment["file_url"] = file_url
         if attachment.get("file_url"):

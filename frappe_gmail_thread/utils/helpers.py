@@ -11,10 +11,12 @@ from frappe.utils import extract_email_id, sanitize_html
 
 class GmailInboundMail(Email):
     def __init__(self, content, email_account=None):
-        self.email_account = email_account
-        self.email_account.attachment_limit = None
-        super().__init__(content)
-        # remove quoted replies from email text content
+        # temp compatibility with frappe.email.receive.Email
+        self.email_account = email_account or frappe._dict()
+        if not hasattr(self.email_account, "attachment_limit"):
+            self.email_account.attachment_limit = None
+
+        super().__init__(content, email_account=self.email_account)
         self.text_content = self.pop_down_quoted_replies(self.text_content, "text")
         self.html_content = self.pop_down_quoted_replies(self.html_content, "html")
         self.set_content_and_type()
