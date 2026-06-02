@@ -1,18 +1,59 @@
-import json
-
 import frappe
 import frappe.utils
+from frappe import _
 
 
 def get_attachments_data(email):
-    attachments_data = json.loads(email.attachments_data)
-    # instead of using file_url from attachments_data, we have to use frappe.get_value to get the latest file_url
+    raw_attachments = getattr(email, "attachments_data", None)
+    if not raw_attachments:
+        return []
+
+    if isinstance(raw_attachments, str):
+        try:
+            attachments_data = frappe.parse_json(raw_attachments)
+        except (TypeError, ValueError, frappe.ValidationError):
+            frappe.log_error(
+                title=_("Invalid Gmail attachments_data JSON"),
+                message=frappe.get_traceback(),
+            )
+            return []
+    elif isinstance(raw_attachments, list):
+        attachments_data = raw_attachments
+    else:
+        return []
+
+    if not attachments_data or not isinstance(attachments_data, list):
+        return []
+
+    file_doc_names = {
+        a.get("file_doc_name")
+        for a in attachments_data
+        if isinstance(a, dict) and a.get("file_doc_name")
+    }
+    file_url_by_name: dict[str, str] = {}
+    if file_doc_names:
+        file_url_by_name = {
+            r["name"]: r["file_url"]
+            for r in frappe.db.get_all(
+                "File",
+                filters={"name": ("in", list(file_doc_names))},
+                fields=["name", "file_url"],
+            )
+        }
+
+    valid: list[dict] = []
     for attachment in attachments_data:
+        if not isinstance(attachment, dict):
+            continue
         file_doc_name = attachment.get("file_doc_name")
         if file_doc_name:
-            file_url = frappe.db.get_value("File", file_doc_name, "file_url")
+            file_url = file_url_by_name.get(file_doc_name)
+            if not file_url:
+                continue
             attachment["file_url"] = file_url
-    return attachments_data
+        if attachment.get("file_url"):
+            valid.append(attachment)
+    return valid
 
 
 @frappe.whitelist()
