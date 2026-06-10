@@ -9,6 +9,7 @@ from frappe_gmail_thread.tests import (
     as_user,
     make_test_gmail_account,
     make_test_user,
+    set_password_field,
 )
 
 SYNC_TASK_MODULE = "frappe_gmail_thread.tasks.sync"
@@ -20,11 +21,8 @@ class TestSyncEmails(IntegrationTestCase):
         make_test_user(TEST_USER)
         with as_user(TEST_USER):
             account = make_test_gmail_account(linked_user=TEST_USER)
-        frappe.db.set_value(
-            "Gmail Account",
-            account.name,
-            {"gmail_enabled": 1, "refresh_token": "rt"},
-        )
+        frappe.db.set_value("Gmail Account", account.name, "gmail_enabled", 1)
+        set_password_field("Gmail Account", account.name, "refresh_token", "rt")
         with (
             patch(f"{SYNC_TASK_MODULE}.is_job_enqueued", return_value=False),
             patch(f"{SYNC_TASK_MODULE}.frappe.enqueue") as mock_enqueue,
@@ -40,11 +38,8 @@ class TestSyncEmails(IntegrationTestCase):
         make_test_user(TEST_USER)
         with as_user(TEST_USER):
             account = make_test_gmail_account(linked_user=TEST_USER)
-        frappe.db.set_value(
-            "Gmail Account",
-            account.name,
-            {"gmail_enabled": 1, "refresh_token": ""},
-        )
+        frappe.db.set_value("Gmail Account", account.name, "gmail_enabled", 1)
+        set_password_field("Gmail Account", account.name, "refresh_token", "")
         with (
             patch(f"{SYNC_TASK_MODULE}.is_job_enqueued", return_value=False),
             patch(f"{SYNC_TASK_MODULE}.frappe.enqueue") as mock_enqueue,
@@ -57,11 +52,8 @@ class TestSyncEmails(IntegrationTestCase):
         make_test_user(TEST_USER)
         with as_user(TEST_USER):
             account = make_test_gmail_account(linked_user=TEST_USER)
-        frappe.db.set_value(
-            "Gmail Account",
-            account.name,
-            {"gmail_enabled": 1, "refresh_token": "rt"},
-        )
+        frappe.db.set_value("Gmail Account", account.name, "gmail_enabled", 1)
+        set_password_field("Gmail Account", account.name, "refresh_token", "rt")
         with (
             patch(f"{SYNC_TASK_MODULE}.is_job_enqueued", return_value=True),
             patch(f"{SYNC_TASK_MODULE}.frappe.enqueue") as mock_enqueue,

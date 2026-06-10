@@ -18,6 +18,7 @@ from frappe_gmail_thread.tests import (
     as_user,
     make_test_gmail_account,
     make_test_user,
+    set_password_field,
 )
 
 OAUTH_MODULE = "frappe_gmail_thread.api.oauth"
@@ -32,11 +33,8 @@ def _ensure_account():
 def _reset_account_with_labels(*, gmail_enabled=1, refresh_token="rt", labels=()):
     """Reset the cached Gmail Account into a known state for pubsub tests, replacing its labels child table."""
     account = _ensure_account()
-    frappe.db.set_value(
-        "Gmail Account",
-        account.name,
-        {"gmail_enabled": gmail_enabled, "refresh_token": refresh_token},
-    )
+    frappe.db.set_value("Gmail Account", account.name, "gmail_enabled", gmail_enabled)
+    set_password_field("Gmail Account", account.name, "refresh_token", refresh_token)
     frappe.db.delete("Gmail Label", {"parent": account.name})
     for idx, (label_id, enabled) in enumerate(labels, start=1):
         row = frappe.get_doc(
@@ -128,11 +126,8 @@ class TestAuthorizeAccess(IntegrationTestCase):
 
     def test_saves_refresh_token_and_authorization_code_on_successful_exchange(self):
         """authorize_access stores refresh_token + authorization_code on the Gmail Account after a successful Google OAuth exchange."""
-        frappe.db.set_value(
-            "Gmail Account",
-            self.account.name,
-            {"refresh_token": "", "authorization_code": ""},
-        )
+        set_password_field("Gmail Account", self.account.name, "refresh_token", "")
+        set_password_field("Gmail Account", self.account.name, "authorization_code", "")
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "access_token": "at-1",
@@ -192,7 +187,7 @@ class TestGetAccessToken(IntegrationTestCase):
 
     def test_raises_validation_error_when_refresh_token_missing(self):
         """get_access_token raises ValidationError when the Gmail Account has no refresh_token."""
-        frappe.db.set_value("Gmail Account", self.account.name, "refresh_token", "")
+        set_password_field("Gmail Account", self.account.name, "refresh_token", "")
         account = frappe.get_doc("Gmail Account", self.account.name)
         with self.assertRaises(frappe.ValidationError):
             get_access_token(account)
