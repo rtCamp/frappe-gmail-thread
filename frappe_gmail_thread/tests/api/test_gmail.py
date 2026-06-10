@@ -9,6 +9,7 @@ from frappe_gmail_thread.tests import (
     as_user,
     make_test_gmail_account,
     make_test_user,
+    set_password_field,
 )
 
 GMAIL_MODULE = "frappe_gmail_thread.api.gmail"
@@ -41,11 +42,8 @@ class TestIsGmailConfigured(IntegrationTestCase):
     def test_returns_false_when_gmail_not_enabled(self):
         """is_gmail_configured returns {configured: False, 'Please configure Gmail'} when the account exists but gmail_enabled=0."""
         account = _ensure_account()
-        frappe.db.set_value(
-            "Gmail Account",
-            account.name,
-            {"gmail_enabled": 0, "refresh_token": "rt"},
-        )
+        frappe.db.set_value("Gmail Account", account.name, "gmail_enabled", 0)
+        set_password_field("Gmail Account", account.name, "refresh_token", "rt")
         with as_user(TEST_USER):
             with patch(f"{GMAIL_MODULE}.frappe.has_permission", return_value=True):
                 result = is_gmail_configured()
@@ -55,11 +53,8 @@ class TestIsGmailConfigured(IntegrationTestCase):
     def test_returns_true_when_enabled_with_refresh_token_and_matching_user(self):
         """is_gmail_configured returns {configured: True} only when gmail_enabled=1, refresh_token is set, and linked_user matches the session user."""
         account = _ensure_account()
-        frappe.db.set_value(
-            "Gmail Account",
-            account.name,
-            {"gmail_enabled": 1, "refresh_token": "rt"},
-        )
+        frappe.db.set_value("Gmail Account", account.name, "gmail_enabled", 1)
+        set_password_field("Gmail Account", account.name, "refresh_token", "rt")
         with as_user(TEST_USER):
             with patch(f"{GMAIL_MODULE}.frappe.has_permission", return_value=True):
                 result = is_gmail_configured()

@@ -3,6 +3,7 @@
 import contextlib
 
 import frappe
+from frappe.utils.password import remove_encrypted_password, set_encrypted_password
 
 TEST_USER = "test_fgt_user1@example.com"
 TEST_USER_2 = "test_fgt_user2@example.com"
@@ -19,6 +20,22 @@ def ensure_doc(doctype, name, **fields):
     return frappe.get_doc({"doctype": doctype, "name": name, **fields}).insert(
         ignore_permissions=True
     )
+
+
+def set_password_field(doctype, name, fieldname, value):
+    """Set or clear a Password field via the encrypted-storage helpers.
+
+    Frappe stores Password fields in two places: the encrypted `__Auth` table
+    (read by `doc.get_password`) and the doctype column (read by attribute
+    access `doc.<fieldname>`, which source code uses for truthy/falsy gates).
+    This helper writes both so the field stays consistent. Passing an empty
+    string or None clears both sides.
+    """
+    if value:
+        set_encrypted_password(doctype, name, value, fieldname)
+    else:
+        remove_encrypted_password(doctype, name, fieldname)
+    frappe.db.set_value(doctype, name, fieldname, value or "", update_modified=False)
 
 
 def make_test_user(email, user_type="System User"):
@@ -62,9 +79,10 @@ def make_test_gmail_account(
     doc = frappe.get_doc(data)
     doc.flags.ignore_validate = True
     doc.insert(ignore_permissions=True)
-    # refresh_token is encrypted; set after insert to avoid validate-time pubsub side-effects
+    # refresh_token is a Password field; route through encrypted storage so doc.get_password reads
+    # back what we set. Done after insert to avoid validate-time pubsub side-effects.
     if refresh_token:
-        frappe.db.set_value("Gmail Account", doc.name, "refresh_token", refresh_token)
+        set_password_field("Gmail Account", doc.name, "refresh_token", refresh_token)
         doc.reload()
     return doc
 

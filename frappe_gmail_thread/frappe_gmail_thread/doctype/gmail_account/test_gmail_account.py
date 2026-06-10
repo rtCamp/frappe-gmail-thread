@@ -12,6 +12,7 @@ from frappe_gmail_thread.tests import (
     as_user,
     make_test_gmail_account,
     make_test_user,
+    set_password_field,
 )
 
 GMAIL_ACCOUNT_MODULE = (
@@ -41,10 +42,12 @@ def _reset_account(
         account = make_test_gmail_account(linked_user=TEST_USER)
     updates = {
         "gmail_enabled": gmail_enabled,
-        "refresh_token": refresh_token or "",
         "last_historyid": last_historyid,
     }
     frappe.db.set_value("Gmail Account", account.name, updates)
+    set_password_field(
+        "Gmail Account", account.name, "refresh_token", refresh_token or ""
+    )
     # Reset the labels child table via direct delete + reinsert (we don't go through save() to avoid hooks).
     frappe.db.delete("Gmail Label", {"parent": account.name})
     if labels:

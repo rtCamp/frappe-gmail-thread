@@ -20,6 +20,7 @@ from frappe_gmail_thread.tests import (
     make_test_gmail_account,
     make_test_gmail_thread,
     make_test_user,
+    set_password_field,
 )
 from frappe_gmail_thread.utils.helpers import AlreadyExistsError
 
@@ -53,8 +54,9 @@ def _reset_account_for_sync(*, last_historyid=0, labels=(("INBOX", True),)):
     frappe.db.set_value(
         "Gmail Account",
         account.name,
-        {"gmail_enabled": 1, "refresh_token": "rt", "last_historyid": last_historyid},
+        {"gmail_enabled": 1, "last_historyid": last_historyid},
     )
+    set_password_field("Gmail Account", account.name, "refresh_token", "rt")
     frappe.db.delete("Gmail Label", {"parent": account.name})
     for idx, (label_id, enabled) in enumerate(labels, start=1):
         row = frappe.get_doc(
@@ -422,7 +424,7 @@ class TestSyncPreconditions(_GmailThreadTestCase):
     def test_throws_when_no_refresh_token(self):
         """sync throws when refresh_token is empty."""
         account = _reset_account_for_sync()
-        frappe.db.set_value("Gmail Account", account.name, "refresh_token", "")
+        set_password_field("Gmail Account", account.name, "refresh_token", "")
         with as_user("Administrator"):
             with self.assertRaises(frappe.ValidationError):
                 sync(user=TEST_USER)
