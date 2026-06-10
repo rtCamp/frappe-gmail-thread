@@ -140,7 +140,7 @@ class TestAuthorizeAccess(IntegrationTestCase):
         }
         with as_user("Administrator"):
             with change_settings(
-                "Google Settings", client_id="cid", client_secret="csec"
+                "Google Settings", enable=1, client_id="cid", client_secret="csec"
             ):
                 with (
                     patch(f"{OAUTH_MODULE}.requests.post", return_value=mock_response),
