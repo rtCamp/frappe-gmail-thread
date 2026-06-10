@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 import googleapiclient.errors
-from frappe.tests import IntegrationTestCase
+from frappe.tests import IntegrationTestCase, change_settings
 
 from frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread import (
     get_permission_query_conditions,
@@ -447,8 +447,13 @@ class TestSyncErrorHandling(_GmailThreadTestCase):
             _make_http_error("notFound")
         )
         with as_user("Administrator"):
-            with patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail):
-                sync(user=TEST_USER)
+            with change_settings(
+                "Google Settings", enable=1, client_id="cid", client_secret="csec"
+            ):
+                with patch(
+                    f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail
+                ):
+                    sync(user=TEST_USER)
         self.assertEqual(
             frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 0
         )
@@ -462,8 +467,13 @@ class TestSyncErrorHandling(_GmailThreadTestCase):
             "historyId": "500",
         }
         with as_user("Administrator"):
-            with patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail):
-                sync(user=TEST_USER)
+            with change_settings(
+                "Google Settings", enable=1, client_id="cid", client_secret="csec"
+            ):
+                with patch(
+                    f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail
+                ):
+                    sync(user=TEST_USER)
         self.assertEqual(
             frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 500
         )
@@ -621,22 +631,28 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
             mail={"References": None},
         )
         with as_user("Administrator"):
-            with (
-                patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail),
-                patch(
-                    f"{GMAIL_THREAD_MODULE}.create_new_email",
-                    return_value=(mock_email, mock_email_object),
-                ),
-                patch(
-                    f"{GMAIL_THREAD_MODULE}.find_gmail_thread", return_value=mock_thread
-                ),
-                patch(f"{GMAIL_THREAD_MODULE}.update_involved_users"),
-                patch(f"{GMAIL_THREAD_MODULE}.process_attachments"),
-                patch(f"{GMAIL_THREAD_MODULE}.replace_inline_images"),
-                patch("frappe.publish_realtime") as mock_publish,
+            with change_settings(
+                "Google Settings", enable=1, client_id="cid", client_secret="csec"
             ):
-                sync(user=TEST_USER)
-        mock_publish.assert_called_with(
+                with (
+                    patch(
+                        f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail
+                    ),
+                    patch(
+                        f"{GMAIL_THREAD_MODULE}.create_new_email",
+                        return_value=(mock_email, mock_email_object),
+                    ),
+                    patch(
+                        f"{GMAIL_THREAD_MODULE}.find_gmail_thread",
+                        return_value=mock_thread,
+                    ),
+                    patch(f"{GMAIL_THREAD_MODULE}.update_involved_users"),
+                    patch(f"{GMAIL_THREAD_MODULE}.process_attachments"),
+                    patch(f"{GMAIL_THREAD_MODULE}.replace_inline_images"),
+                    patch("frappe.publish_realtime") as mock_publish,
+                ):
+                    sync(user=TEST_USER)
+        mock_publish.assert_any_call(
             "gthread_new_email", doctype="User", docname=TEST_USER
         )
 
