@@ -7,6 +7,8 @@ from frappe_gmail_thread.api.oauth import (
     authorize_access,
     callback,
     check_gmail_object,
+    disable_pubsub,
+    enable_pubsub,
     get_access_token,
     get_auth_url,
 )
@@ -25,6 +27,33 @@ def _ensure_account():
     make_test_user(TEST_USER)
     with as_user(TEST_USER):
         return make_test_gmail_account(linked_user=TEST_USER)
+
+
+def _reset_account_with_labels(*, gmail_enabled=1, refresh_token="rt", labels=()):
+    """Reset the cached Gmail Account into a known state for pubsub tests, replacing its labels child table."""
+    account = _ensure_account()
+    frappe.db.set_value(
+        "Gmail Account",
+        account.name,
+        {"gmail_enabled": gmail_enabled, "refresh_token": refresh_token},
+    )
+    frappe.db.delete("Gmail Label", {"parent": account.name})
+    for idx, (label_id, enabled) in enumerate(labels, start=1):
+        row = frappe.get_doc(
+            {
+                "doctype": "Gmail Label",
+                "parent": account.name,
+                "parenttype": "Gmail Account",
+                "parentfield": "labels",
+                "idx": idx,
+                "label_id": label_id,
+                "label_name": label_id,
+                "enabled": 1 if enabled else 0,
+            }
+        )
+        row.flags.ignore_validate = True
+        row.db_insert()
+    return frappe.get_doc("Gmail Account", account.name)
 
 
 class TestGetAuthUrl(IntegrationTestCase):
@@ -167,3 +196,128 @@ class TestGetAccessToken(IntegrationTestCase):
         account = frappe.get_doc("Gmail Account", self.account.name)
         with self.assertRaises(frappe.ValidationError):
             get_access_token(account)
+
+
+class TestEnablePubsub(IntegrationTestCase):
+    def test_returns_false_when_gmail_not_enabled(self):
+        """enable_pubsub returns False (no-op) when gmail_enabled=0."""
+        account = _reset_account_with_labels(gmail_enabled=0)
+        with change_settings(
+            "Google Settings",
+            custom_gmail_sync_in_realtime=1,
+            custom_gmail_pubsub_topic="topic",
+        ):
+            with patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get:
+                result = enable_pubsub(account)
+        self.assertEqual(result, False)
+        mock_get.assert_not_called()
+
+    def test_returns_false_when_realtime_disabled(self):
+        """enable_pubsub returns False (no-op) when custom_gmail_sync_in_realtime=0."""
+        account = _reset_account_with_labels(gmail_enabled=1)
+        with change_settings(
+            "Google Settings",
+            custom_gmail_sync_in_realtime=0,
+            custom_gmail_pubsub_topic="topic",
+        ):
+            with patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get:
+                result = enable_pubsub(account)
+        self.assertEqual(result, False)
+        mock_get.assert_not_called()
+
+    def test_throws_when_no_refresh_token(self):
+        """enable_pubsub throws when account has no refresh_token."""
+        account = _reset_account_with_labels(gmail_enabled=1, refresh_token="")
+        with change_settings(
+            "Google Settings",
+            custom_gmail_sync_in_realtime=1,
+            custom_gmail_pubsub_topic="topic",
+        ):
+            with self.assertRaises(frappe.ValidationError):
+                enable_pubsub(account)
+
+    def test_throws_when_no_pubsub_topic_configured(self):
+        """enable_pubsub throws when Google Settings has no custom_gmail_pubsub_topic."""
+        account = _reset_account_with_labels(gmail_enabled=1)
+        with change_settings(
+            "Google Settings",
+            custom_gmail_sync_in_realtime=1,
+            custom_gmail_pubsub_topic="",
+        ):
+            with self.assertRaises(frappe.ValidationError):
+                enable_pubsub(account)
+
+    def test_calls_watch_with_enabled_labels_and_appends_sent(self):
+        """enable_pubsub calls users().watch() with the enabled label_ids plus SENT (appended if absent) and the configured topic."""
+        account = _reset_account_with_labels(
+            gmail_enabled=1, labels=(("INBOX", True), ("STARRED", False))
+        )
+        gmail = MagicMock()
+        with change_settings(
+            "Google Settings",
+            custom_gmail_sync_in_realtime=1,
+            custom_gmail_pubsub_topic="projects/x/topics/y",
+        ):
+            with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
+                enable_pubsub(account)
+        body = gmail.users().watch.call_args.kwargs["body"]
+        self.assertEqual(set(body["labelIds"]), {"INBOX", "SENT"})
+        self.assertEqual(body["topicName"], "projects/x/topics/y")
+        self.assertEqual(body["labelFilterBehavior"], "include")
+
+    def test_does_not_duplicate_sent_when_already_in_enabled_labels(self):
+        """enable_pubsub does not duplicate SENT when it is already in the enabled label_ids."""
+        account = _reset_account_with_labels(
+            gmail_enabled=1, labels=(("INBOX", True), ("SENT", True))
+        )
+        gmail = MagicMock()
+        with change_settings(
+            "Google Settings",
+            custom_gmail_sync_in_realtime=1,
+            custom_gmail_pubsub_topic="topic",
+        ):
+            with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
+                enable_pubsub(account)
+        body = gmail.users().watch.call_args.kwargs["body"]
+        self.assertEqual(body["labelIds"].count("SENT"), 1)
+
+
+class TestDisablePubsub(IntegrationTestCase):
+    def test_returns_false_when_gmail_not_enabled(self):
+        """disable_pubsub returns False (no-op) when gmail_enabled=0."""
+        account = _reset_account_with_labels(gmail_enabled=0)
+        with change_settings(
+            "Google Settings",
+            custom_gmail_sync_in_realtime=0,
+            custom_gmail_pubsub_topic="topic",
+        ):
+            with patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get:
+                result = disable_pubsub(account)
+        self.assertEqual(result, False)
+        mock_get.assert_not_called()
+
+    def test_returns_false_when_realtime_still_enabled(self):
+        """disable_pubsub returns False (no-op) when custom_gmail_sync_in_realtime is still 1."""
+        account = _reset_account_with_labels(gmail_enabled=1)
+        with change_settings(
+            "Google Settings",
+            custom_gmail_sync_in_realtime=1,
+            custom_gmail_pubsub_topic="topic",
+        ):
+            with patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get:
+                result = disable_pubsub(account)
+        self.assertEqual(result, False)
+        mock_get.assert_not_called()
+
+    def test_calls_stop_when_account_enabled_and_realtime_disabled(self):
+        """disable_pubsub calls users().stop() when gmail_enabled=1 and realtime=0."""
+        account = _reset_account_with_labels(gmail_enabled=1)
+        gmail = MagicMock()
+        with change_settings(
+            "Google Settings",
+            custom_gmail_sync_in_realtime=0,
+            custom_gmail_pubsub_topic="topic",
+        ):
+            with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
+                disable_pubsub(account)
+        gmail.users().stop.assert_called_once_with(userId="me")
