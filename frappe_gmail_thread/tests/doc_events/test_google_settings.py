@@ -27,12 +27,8 @@ class TestOnUpdate(IntegrationTestCase):
         gs_doc.has_value_changed.return_value = True
         gs_doc.custom_gmail_sync_in_realtime = 1
         with (
-            patch(
-                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.enable_pubsub"
-            ) as mock_enable,
-            patch(
-                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.disable_pubsub"
-            ) as mock_disable,
+            patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.enable_pubsub") as mock_enable,
+            patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.disable_pubsub") as mock_disable,
         ):
             on_update(gs_doc)
         mock_enable.assert_called_once()
@@ -44,12 +40,8 @@ class TestOnUpdate(IntegrationTestCase):
         gs_doc.has_value_changed.return_value = True
         gs_doc.custom_gmail_sync_in_realtime = 0
         with (
-            patch(
-                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.enable_pubsub"
-            ) as mock_enable,
-            patch(
-                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.disable_pubsub"
-            ) as mock_disable,
+            patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.enable_pubsub") as mock_enable,
+            patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.disable_pubsub") as mock_disable,
         ):
             on_update(gs_doc)
         mock_enable.assert_not_called()
@@ -60,12 +52,8 @@ class TestOnUpdate(IntegrationTestCase):
         gs_doc = MagicMock()
         gs_doc.has_value_changed.return_value = False
         with (
-            patch(
-                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.enable_pubsub"
-            ) as mock_enable,
-            patch(
-                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.disable_pubsub"
-            ) as mock_disable,
+            patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.enable_pubsub") as mock_enable,
+            patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.disable_pubsub") as mock_disable,
         ):
             on_update(gs_doc)
         mock_enable.assert_not_called()
