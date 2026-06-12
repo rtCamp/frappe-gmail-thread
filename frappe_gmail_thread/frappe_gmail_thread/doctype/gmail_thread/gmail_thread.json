@@ -13,6 +13,8 @@
   "reference_name",
   "reference_owner",
   "gmail_thread_id",
+  "conversation_root",
+  "gmail_thread_ids",
   "status",
   "column_break_cmhm",
   "gmail_account",
@@ -74,6 +76,22 @@
    "read_only": 1,
    "reqd": 1,
    "unique": 1
+  },
+  {
+   "description": "Message-ID of the first mail in the conversation (RFC References root). Stable, self-derivable key that keeps forks and out-of-order/multi-account syncs on one thread.",
+   "fieldname": "conversation_root",
+   "fieldtype": "Data",
+   "label": "Conversation Root",
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "description": "Additional Gmail thread ids this conversation has absorbed (subject-change forks, merges).",
+   "fieldname": "gmail_thread_ids",
+   "fieldtype": "Table",
+   "label": "Gmail Thread IDs",
+   "options": "Gmail Thread Mapped ID",
+   "read_only": 1
   },
   {
    "fieldname": "gmail_account",

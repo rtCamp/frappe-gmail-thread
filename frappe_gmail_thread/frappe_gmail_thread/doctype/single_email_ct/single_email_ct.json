@@ -20,6 +20,7 @@
   "date_and_time",
   "read_receipt",
   "email_message_id",
+  "conversation_root",
   "linked_communication",
   "gmail_message_id",
   "column_break_bgvf",
@@ -104,6 +105,12 @@
    "fieldname": "email_message_id",
    "fieldtype": "Small Text",
    "label": "Email Message ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "conversation_root",
+   "fieldtype": "Data",
+   "label": "Conversation Root",
    "read_only": 1
   },
   {

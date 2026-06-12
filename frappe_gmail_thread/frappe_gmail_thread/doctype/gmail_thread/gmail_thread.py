@@ -7,13 +7,13 @@ import frappe.share
 import googleapiclient.errors
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import get_string_between
 
 from frappe_gmail_thread.api.oauth import get_gmail_object
 from frappe_gmail_thread.utils.helpers import (
     AlreadyExistsError,
+    attach_message_to_thread,
     create_new_email,
-    find_gmail_thread,
+    merge_gmail_threads,
     process_attachments,
     replace_inline_images,
 )
@@ -159,7 +159,6 @@ def sync(user=None):
                     thread_data = (
                         gmail.users().threads().get(userId="me", id=thread_id).execute()
                     )
-                    gmail_thread = find_gmail_thread(thread_id)
                     involved_users = set()
                     email = None
                     for message in thread_data["messages"]:
@@ -184,33 +183,15 @@ def sync(user=None):
                             continue
                         if "DRAFT" in raw_email.get("labelIds", []):
                             continue
-                        is_new_thread = False
                         try:
                             email, email_object = create_new_email(
                                 raw_email, gmail_account
                             )
                         except AlreadyExistsError:
                             continue
-                        if not gmail_thread:
-                            email_message_id = email_object.message_id
-                            email_references = email_object.mail.get("References")
-                            if email_references:
-                                email_references = [
-                                    get_string_between("<", x, ">")
-                                    for x in email_references.split()
-                                ]
-                            else:
-                                email_references = []
-                            gmail_thread = find_gmail_thread(
-                                thread_id, [email_message_id] + email_references
-                            )
-                        if gmail_thread:
-                            gmail_thread.reload()
-                        else:
-                            gmail_thread = frappe.new_doc("Gmail Thread")
-                            gmail_thread.gmail_thread_id = thread_id
-                            gmail_thread.gmail_account = gmail_account.name
-                            is_new_thread = True
+                        gmail_thread, is_new_thread = attach_message_to_thread(
+                            gmail_account, thread_id, email, email_object
+                        )
                         if not gmail_thread.subject_of_first_mail:
                             gmail_thread.subject_of_first_mail = email.subject
                             gmail_thread.creation = email.date_and_time
@@ -306,33 +287,16 @@ def sync(user=None):
                             if "DRAFT" in raw_email.get("labelIds", []):
                                 continue
                             thread_id = message["threadId"]
-                            gmail_thread = find_gmail_thread(thread_id)
                             involved_users = set()
-                            is_new_thread = False
                             try:
                                 email, email_object = create_new_email(
                                     raw_email, gmail_account
                                 )
                             except AlreadyExistsError:
                                 continue
-                            if not gmail_thread:
-                                email_message_id = email_object.message_id
-                                email_references = email_object.mail.get("References")
-                                if email_references:
-                                    email_references = [
-                                        get_string_between("<", x, ">")
-                                        for x in email_references.split()
-                                    ]
-                                else:
-                                    email_references = []
-                                gmail_thread = find_gmail_thread(
-                                    thread_id, [email_message_id] + email_references
-                                )
-                            if not gmail_thread:
-                                gmail_thread = frappe.new_doc("Gmail Thread")
-                                gmail_thread.gmail_thread_id = thread_id
-                                gmail_thread.gmail_account = gmail_account.name
-                                is_new_thread = True
+                            gmail_thread, is_new_thread = attach_message_to_thread(
+                                gmail_account, thread_id, email, email_object
+                            )
                             if not gmail_thread.subject_of_first_mail:
                                 gmail_thread.subject_of_first_mail = email.subject
                                 gmail_thread.creation = email.date_and_time
@@ -388,6 +352,37 @@ def sync(user=None):
         except Exception:
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")
             continue
+
+
+@frappe.whitelist()
+def reconcile_duplicate_threads(limit: int = 200):
+    frappe.only_for("System Manager")
+    rows = frappe.db.sql(
+        """
+        select e.parent as thread, t.name as other
+        from `tabSingle Email CT` e
+        join `tabGmail Thread` t on t.conversation_root = e.conversation_root
+        where e.parenttype = 'Gmail Thread'
+          and e.parentfield = 'emails'
+          and e.conversation_root is not null and e.conversation_root != ''
+          and t.name != e.parent
+        limit %s
+        """,
+        (limit,),
+        as_dict=True,
+    )
+    merged = set()
+    for row in rows:
+        key = tuple(sorted([row.thread, row.other]))
+        if key in merged:
+            continue
+        merged.add(key)
+        try:
+            merge_gmail_threads(row.thread, row.other)
+            frappe.db.commit()  # nosemgrep
+        except Exception:
+            frappe.db.rollback()
+            frappe.log_error(frappe.get_traceback(), "Gmail Thread Reconcile Error")
 
 
 def update_involved_users(doc, involved_users):
