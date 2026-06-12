@@ -194,7 +194,6 @@ def sync(user=None):
                         )
                         if not gmail_thread.subject_of_first_mail:
                             gmail_thread.subject_of_first_mail = email.subject
-                            gmail_thread.creation = email.date_and_time
                         involved_users.add(email_object.from_email)
                         for recipient in email_object.to:
                             involved_users.add(recipient)
