@@ -12,6 +12,7 @@ from frappe.utils import get_string_between
 from frappe_gmail_thread.api.oauth import get_gmail_object
 from frappe_gmail_thread.utils.helpers import (
     AlreadyExistsError,
+    add_thread_references,
     create_new_email,
     find_gmail_thread,
     process_attachments,
@@ -225,6 +226,12 @@ def sync(user=None):
                         update_involved_users(gmail_thread, involved_users)
                         process_attachments(email, gmail_thread, email_object)
                         replace_inline_images(email, email_object)
+                        add_thread_references(
+                            gmail_thread,
+                            email_object,
+                            thread_id=thread_id,
+                            gmail_message_id=message["id"],
+                        )
                         gmail_thread.append("emails", email)
                         gmail_thread.save(ignore_permissions=True)
                         frappe.db.commit()  # nosemgrep
@@ -347,6 +354,12 @@ def sync(user=None):
                             update_involved_users(gmail_thread, involved_users)
                             process_attachments(email, gmail_thread, email_object)
                             replace_inline_images(email, email_object)
+                            add_thread_references(
+                                gmail_thread,
+                                email_object,
+                                thread_id=thread_id,
+                                gmail_message_id=message["id"],
+                            )
                             gmail_thread.append("emails", email)
                             gmail_thread.save(ignore_permissions=True)
                             frappe.db.set_value(
