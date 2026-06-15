@@ -7,7 +7,7 @@ import frappe.share
 import googleapiclient.errors
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import get_string_between
+from frappe.utils import get_datetime, get_string_between
 
 from frappe_gmail_thread.api.oauth import get_gmail_object
 from frappe_gmail_thread.utils.helpers import (
@@ -89,6 +89,18 @@ class GmailThread(Document):
                         break
             elif self.status == "Linked":
                 self.status = "Open"
+
+        earliest = None
+        earliest_dt = None
+        for email in self.emails or []:
+            if not email.date_and_time:
+                continue
+            email_dt = get_datetime(email.date_and_time)
+            if earliest is None or email_dt < earliest_dt:
+                earliest = email
+                earliest_dt = email_dt
+        if earliest and earliest.subject:
+            self.subject_of_first_mail = earliest.subject
 
         subjects = set()
         if self.subject_of_first_mail:
@@ -232,7 +244,15 @@ def sync(user=None):
                             thread_id=thread_id,
                             gmail_message_id=message["id"],
                         )
-                        gmail_thread.append("emails", email)
+                        # gmail_thread.get("emails").append(email)
+                        gmail_list = gmail_thread.get("emails") or []
+                        gmail_list = [email] + gmail_list
+                        for i in gmail_list:
+                            del i.idx  # remove idx to avoid duplication error
+                        gmail_list.sort(
+                            key=lambda x: frappe.utils.get_datetime(x.date_and_time)
+                        )
+                        gmail_thread.set("emails", gmail_list)
                         gmail_thread.save(ignore_permissions=True)
                         frappe.db.commit()  # nosemgrep
                         frappe.db.set_value(
@@ -360,7 +380,15 @@ def sync(user=None):
                                 thread_id=thread_id,
                                 gmail_message_id=message["id"],
                             )
-                            gmail_thread.append("emails", email)
+                            # gmail_thread.append("emails", email)
+                            gmail_list = gmail_thread.get("emails") or []
+                            gmail_list = [email] + gmail_list
+                            for i in gmail_list:
+                                del i.idx  # remove idx to avoid duplication error
+                            gmail_list.sort(
+                                key=lambda x: frappe.utils.get_datetime(x.date_and_time)
+                            )
+                            gmail_thread.set("emails", gmail_list)
                             gmail_thread.save(ignore_permissions=True)
                             frappe.db.set_value(
                                 "Gmail Thread",
