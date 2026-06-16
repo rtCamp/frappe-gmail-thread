@@ -90,17 +90,9 @@ class GmailThread(Document):
             elif self.status == "Linked":
                 self.status = "Open"
 
-        earliest = None
-        earliest_dt = None
-        for email in self.emails or []:
-            if not email.date_and_time:
-                continue
-            email_dt = get_datetime(email.date_and_time)
-            if earliest is None or email_dt < earliest_dt:
-                earliest = email
-                earliest_dt = email_dt
-        if earliest and earliest.subject:
-            self.subject_of_first_mail = earliest.subject
+        emails = self.emails or []
+        if emails and emails[0].subject:
+            self.subject_of_first_mail = emails[0].subject
 
         subjects = set()
         if self.subject_of_first_mail:
