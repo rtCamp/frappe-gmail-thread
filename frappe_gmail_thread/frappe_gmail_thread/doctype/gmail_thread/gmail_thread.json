@@ -109,6 +109,7 @@
   {
    "fieldname": "references",
    "fieldtype": "Table",
+   "hidden": 1,
    "label": "References",
    "options": "Gmail Thread Reference",
    "read_only": 1

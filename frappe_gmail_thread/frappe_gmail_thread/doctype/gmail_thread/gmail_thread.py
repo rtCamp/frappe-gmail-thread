@@ -226,7 +226,10 @@ def sync(user=None):
                             is_new_thread = True
                         if not gmail_thread.subject_of_first_mail:
                             gmail_thread.subject_of_first_mail = email.subject
-                            gmail_thread.creation = email.date_and_time
+                        if gmail_thread.creation is None or get_datetime(
+                            email.date_and_time
+                        ) < get_datetime(gmail_thread.creation):
+                            is_new_thread = True
                         involved_users.add(email_object.from_email)
                         for recipient in email_object.to:
                             involved_users.add(recipient)
@@ -252,6 +255,7 @@ def sync(user=None):
                         gmail_list.sort(
                             key=lambda x: frappe.utils.get_datetime(x.date_and_time)
                         )
+                        latest_dt = gmail_list[-1].date_and_time
                         gmail_thread.set("emails", gmail_list)
                         gmail_thread.save(ignore_permissions=True)
                         frappe.db.commit()  # nosemgrep
@@ -259,7 +263,7 @@ def sync(user=None):
                             "Gmail Thread",
                             gmail_thread.name,
                             "modified",
-                            email.date_and_time,
+                            latest_dt,
                             update_modified=False,
                         )
                         if is_new_thread:  # update creation date
@@ -362,7 +366,10 @@ def sync(user=None):
                                 is_new_thread = True
                             if not gmail_thread.subject_of_first_mail:
                                 gmail_thread.subject_of_first_mail = email.subject
-                                gmail_thread.creation = email.date_and_time
+                            if gmail_thread.creation is None or get_datetime(
+                                email.date_and_time
+                            ) < get_datetime(gmail_thread.creation):
+                                is_new_thread = True
                             involved_users.add(email_object.from_email)
                             for recipient in email_object.to:
                                 involved_users.add(recipient)
@@ -388,13 +395,14 @@ def sync(user=None):
                             gmail_list.sort(
                                 key=lambda x: frappe.utils.get_datetime(x.date_and_time)
                             )
+                            latest_dt = gmail_list[-1].date_and_time
                             gmail_thread.set("emails", gmail_list)
                             gmail_thread.save(ignore_permissions=True)
                             frappe.db.set_value(
                                 "Gmail Thread",
                                 gmail_thread.name,
                                 "modified",
-                                email.date_and_time,
+                                latest_dt,
                                 update_modified=False,
                             )
                             if is_new_thread:  # update creation date
