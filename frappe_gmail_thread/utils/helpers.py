@@ -114,6 +114,7 @@ def find_gmail_thread(thread_id, message_ids: list = None):
                 filters={
                     "reference_id": ["in", candidate_ids],
                     "parenttype": "Gmail Thread",
+                    "parentfield": "references",
                 },
                 pluck="parent",
                 limit=1,
