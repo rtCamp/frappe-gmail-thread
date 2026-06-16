@@ -6,7 +6,7 @@ from uuid import uuid4
 import frappe
 from bs4 import BeautifulSoup
 from frappe.email.receive import Email, MaxFileSizeReachedError
-from frappe.utils import extract_email_id, get_string_between, sanitize_html
+from frappe.utils import extract_email_id, sanitize_html
 
 
 class GmailInboundMail(Email):
@@ -169,7 +169,8 @@ def collect_reference_ids(email_object, thread_id=None):
         header_values.extend(in_reply_to.split())
 
     for raw in header_values:
-        _add(get_string_between("<", raw, ">"), "Message-ID")
+        message_id = raw.strip(" <>")
+        _add(message_id, "Message-ID")
 
     return refs
 

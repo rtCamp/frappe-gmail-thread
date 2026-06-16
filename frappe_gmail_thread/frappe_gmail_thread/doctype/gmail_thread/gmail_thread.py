@@ -243,7 +243,8 @@ def sync(user=None):
                         gmail_list = gmail_thread.get("emails") or []
                         gmail_list = [email] + gmail_list
                         for i in gmail_list:
-                            del i.idx  # remove idx to avoid duplication error
+                            if hasattr(i, "idx"):
+                                del i.idx  # remove idx to avoid duplication error
                         gmail_list.sort(
                             key=lambda x: frappe.utils.get_datetime(x.date_and_time)
                         )
@@ -383,7 +384,8 @@ def sync(user=None):
                             gmail_list = gmail_thread.get("emails") or []
                             gmail_list = [email] + gmail_list
                             for i in gmail_list:
-                                del i.idx  # remove idx to avoid duplication error
+                                if hasattr(i, "idx"):
+                                    del i.idx  # remove idx to avoid duplication error
                             gmail_list.sort(
                                 key=lambda x: frappe.utils.get_datetime(x.date_and_time)
                             )
