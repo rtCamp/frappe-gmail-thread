@@ -239,7 +239,6 @@ def sync(user=None):
                             thread_id=thread_id,
                             gmail_message_id=message["id"],
                         )
-                        # gmail_thread.get("emails").append(email)
                         gmail_list = gmail_thread.get("emails") or []
                         gmail_list = [email] + gmail_list
                         for i in gmail_list:
@@ -380,7 +379,6 @@ def sync(user=None):
                                 thread_id=thread_id,
                                 gmail_message_id=message["id"],
                             )
-                            # gmail_thread.append("emails", email)
                             gmail_list = gmail_thread.get("emails") or []
                             gmail_list = [email] + gmail_list
                             for i in gmail_list:
