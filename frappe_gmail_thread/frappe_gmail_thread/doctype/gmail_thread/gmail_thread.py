@@ -239,16 +239,11 @@ def sync(user=None):
                             thread_id=thread_id,
                             gmail_message_id=message["id"],
                         )
-                        gmail_list = gmail_thread.get("emails") or []
-                        gmail_list = [email] + gmail_list
-                        for i in gmail_list:
-                            if hasattr(i, "idx"):
-                                del i.idx  # remove idx to avoid duplication error
-                        gmail_list.sort(
-                            key=lambda x: frappe.utils.get_datetime(x.date_and_time)
+                        pos = get_email_insert_position(
+                            gmail_thread.emails or [], email
                         )
-                        latest_dt = gmail_list[-1].date_and_time
-                        gmail_thread.set("emails", gmail_list)
+                        gmail_thread.append("emails", email, position=pos)
+                        latest_dt = gmail_thread.emails[-1].date_and_time
                         gmail_thread.save(ignore_permissions=True)
                         frappe.db.commit()  # nosemgrep
                         frappe.db.set_value(
@@ -379,16 +374,11 @@ def sync(user=None):
                                 thread_id=thread_id,
                                 gmail_message_id=message["id"],
                             )
-                            gmail_list = gmail_thread.get("emails") or []
-                            gmail_list = [email] + gmail_list
-                            for i in gmail_list:
-                                if hasattr(i, "idx"):
-                                    del i.idx  # remove idx to avoid duplication error
-                            gmail_list.sort(
-                                key=lambda x: frappe.utils.get_datetime(x.date_and_time)
+                            pos = get_email_insert_position(
+                                gmail_thread.emails or [], email
                             )
-                            latest_dt = gmail_list[-1].date_and_time
-                            gmail_thread.set("emails", gmail_list)
+                            gmail_thread.append("emails", email, position=pos)
+                            latest_dt = gmail_thread.emails[-1].date_and_time
                             gmail_thread.save(ignore_permissions=True)
                             frappe.db.set_value(
                                 "Gmail Thread",
@@ -443,6 +433,33 @@ def update_involved_users(doc, involved_users):
         if user.name not in involved_users_linked:
             involved_user = frappe.get_doc(doctype="Involved User", account=user.name)
             doc.append("involved_users", involved_user)
+
+
+def get_email_insert_position(gmail_list, email):
+    """Find the position to insert email by `date_and_time` in ascending order.
+
+    Returns:
+        int: 0-based position (or -1 to append at end)
+    """
+    if not gmail_list:
+        return -1
+
+    email_dt = get_datetime(email.date_and_time)
+    last_dt = get_datetime(gmail_list[-1].date_and_time)
+
+    if email_dt >= last_dt:
+        return -1
+
+    low, high = 0, len(gmail_list)
+    while low < high:
+        mid = (low + high) // 2
+        mid_dt = get_datetime(gmail_list[mid].date_and_time)
+        if mid_dt <= email_dt:
+            low = mid + 1
+        else:
+            high = mid
+
+    return low
 
 
 def get_permission_query_conditions(user):
