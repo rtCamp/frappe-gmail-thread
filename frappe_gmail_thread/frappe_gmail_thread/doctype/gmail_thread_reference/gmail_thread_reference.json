@@ -1,0 +1,46 @@
+{
+ "actions": [],
+ "creation": "2026-06-15 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "reference_id",
+  "reference_type",
+  "gmail_message_id"
+ ],
+ "fields": [
+  {
+   "fieldname": "reference_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Reference ID",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "default": "Message-ID",
+   "fieldname": "reference_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Reference Type",
+   "options": "Message-ID\nThread-ID"
+  },
+  {
+   "fieldname": "gmail_message_id",
+   "fieldtype": "Data",
+   "label": "Source Gmail Message ID"
+  }
+ ],
+ "istable": 1,
+ "links": [],
+ "modified": "2026-06-15 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Frappe Gmail Thread",
+ "name": "Gmail Thread Reference",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
