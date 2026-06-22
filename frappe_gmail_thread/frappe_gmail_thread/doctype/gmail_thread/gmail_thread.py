@@ -7,11 +7,12 @@ import frappe.share
 import googleapiclient.errors
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import get_string_between
+from frappe.utils import get_datetime, get_string_between
 
 from frappe_gmail_thread.api.oauth import get_gmail_object
 from frappe_gmail_thread.utils.helpers import (
     AlreadyExistsError,
+    add_thread_references,
     create_new_email,
     find_gmail_thread,
     process_attachments,
@@ -88,6 +89,10 @@ class GmailThread(Document):
                         break
             elif self.status == "Linked":
                 self.status = "Open"
+
+        emails = self.emails or []
+        if emails and emails[0].subject:
+            self.subject_of_first_mail = emails[0].subject
 
         subjects = set()
         if self.subject_of_first_mail:
@@ -213,7 +218,10 @@ def sync(user=None):
                             is_new_thread = True
                         if not gmail_thread.subject_of_first_mail:
                             gmail_thread.subject_of_first_mail = email.subject
-                            gmail_thread.creation = email.date_and_time
+                        if gmail_thread.creation is None or get_datetime(
+                            email.date_and_time
+                        ) < get_datetime(gmail_thread.creation):
+                            is_new_thread = True
                         involved_users.add(email_object.from_email)
                         for recipient in email_object.to:
                             involved_users.add(recipient)
@@ -225,14 +233,24 @@ def sync(user=None):
                         update_involved_users(gmail_thread, involved_users)
                         process_attachments(email, gmail_thread, email_object)
                         replace_inline_images(email, email_object)
-                        gmail_thread.append("emails", email)
+                        add_thread_references(
+                            gmail_thread,
+                            email_object,
+                            thread_id=thread_id,
+                            gmail_message_id=message["id"],
+                        )
+                        pos = get_email_insert_position(
+                            gmail_thread.emails or [], email
+                        )
+                        gmail_thread.append("emails", email, position=pos)
+                        latest_dt = gmail_thread.emails[-1].date_and_time
                         gmail_thread.save(ignore_permissions=True)
                         frappe.db.commit()  # nosemgrep
                         frappe.db.set_value(
                             "Gmail Thread",
                             gmail_thread.name,
                             "modified",
-                            email.date_and_time,
+                            latest_dt,
                             update_modified=False,
                         )
                         if is_new_thread:  # update creation date
@@ -335,7 +353,10 @@ def sync(user=None):
                                 is_new_thread = True
                             if not gmail_thread.subject_of_first_mail:
                                 gmail_thread.subject_of_first_mail = email.subject
-                                gmail_thread.creation = email.date_and_time
+                            if gmail_thread.creation is None or get_datetime(
+                                email.date_and_time
+                            ) < get_datetime(gmail_thread.creation):
+                                is_new_thread = True
                             involved_users.add(email_object.from_email)
                             for recipient in email_object.to:
                                 involved_users.add(recipient)
@@ -347,13 +368,23 @@ def sync(user=None):
                             update_involved_users(gmail_thread, involved_users)
                             process_attachments(email, gmail_thread, email_object)
                             replace_inline_images(email, email_object)
-                            gmail_thread.append("emails", email)
+                            add_thread_references(
+                                gmail_thread,
+                                email_object,
+                                thread_id=thread_id,
+                                gmail_message_id=message["id"],
+                            )
+                            pos = get_email_insert_position(
+                                gmail_thread.emails or [], email
+                            )
+                            gmail_thread.append("emails", email, position=pos)
+                            latest_dt = gmail_thread.emails[-1].date_and_time
                             gmail_thread.save(ignore_permissions=True)
                             frappe.db.set_value(
                                 "Gmail Thread",
                                 gmail_thread.name,
                                 "modified",
-                                email.date_and_time,
+                                latest_dt,
                                 update_modified=False,
                             )
                             if is_new_thread:  # update creation date
@@ -402,6 +433,33 @@ def update_involved_users(doc, involved_users):
         if user.name not in involved_users_linked:
             involved_user = frappe.get_doc(doctype="Involved User", account=user.name)
             doc.append("involved_users", involved_user)
+
+
+def get_email_insert_position(gmail_list, email):
+    """Find the position to insert email by `date_and_time` in ascending order.
+
+    Returns:
+        int: 0-based position (or -1 to append at end)
+    """
+    if not gmail_list:
+        return -1
+
+    email_dt = get_datetime(email.date_and_time)
+    last_dt = get_datetime(gmail_list[-1].date_and_time)
+
+    if email_dt >= last_dt:
+        return -1
+
+    low, high = 0, len(gmail_list)
+    while low < high:
+        mid = (low + high) // 2
+        mid_dt = get_datetime(gmail_list[mid].date_and_time)
+        if mid_dt <= email_dt:
+            low = mid + 1
+        else:
+            high = mid
+
+    return low
 
 
 def get_permission_query_conditions(user):

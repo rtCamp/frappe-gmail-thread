@@ -105,6 +105,24 @@ def find_gmail_thread(thread_id, message_ids: list = None):
         gmail_thread = frappe.get_doc("Gmail Thread", {"gmail_thread_id": thread_id})
     except frappe.DoesNotExistError:
         gmail_thread = None
+
+        candidate_ids = [thread_id] + (message_ids or [])
+        candidate_ids = [x for x in candidate_ids if x]
+        if candidate_ids:
+            ref_parents = frappe.get_all(
+                "Gmail Thread Reference",
+                filters={
+                    "reference_id": ["in", candidate_ids],
+                    "parenttype": "Gmail Thread",
+                    "parentfield": "references",
+                },
+                pluck="parent",
+                limit=1,
+            )
+            if ref_parents:
+                return frappe.get_doc("Gmail Thread", ref_parents[0])
+
+        # for old threads, check if any of the message_ids are already in Single Email CT
         if message_ids:
             for message_id in message_ids:
                 try:
@@ -119,6 +137,61 @@ def find_gmail_thread(thread_id, message_ids: list = None):
                 except frappe.DoesNotExistError:
                     pass
     return gmail_thread
+
+
+def collect_reference_ids(email_object, thread_id=None):
+    """Return list of (reference_id, reference_type) for a parsed email.
+
+    Includes the Gmail thread id, this message's own Message-ID, and every
+    Message-ID found in the References and In-Reply-To headers.
+    """
+    refs = []
+    seen = set()
+
+    def _add(value, ref_type):
+        if not value:
+            return
+        value = value.strip()
+        if value and value not in seen:
+            seen.add(value)
+            refs.append((value, ref_type))
+
+    if thread_id:
+        _add(thread_id, "Thread-ID")
+    _add(email_object.message_id, "Message-ID")
+
+    header_values = []
+    references = email_object.mail.get("References")
+    if references:
+        header_values.extend(references.split())
+    in_reply_to = email_object.mail.get("In-Reply-To")
+    if in_reply_to:
+        header_values.extend(in_reply_to.split())
+
+    for raw in header_values:
+        message_id = raw.strip(" <>")
+        _add(message_id, "Message-ID")
+
+    return refs
+
+
+def add_thread_references(
+    gmail_thread, email_object, thread_id=None, gmail_message_id=None
+):
+    """Append any new reference ids for this email to the thread, skipping dupes."""
+    existing = {row.reference_id for row in (gmail_thread.references or [])}
+    for reference_id, reference_type in collect_reference_ids(email_object, thread_id):
+        if reference_id in existing:
+            continue
+        existing.add(reference_id)
+        gmail_thread.append(
+            "references",
+            {
+                "reference_id": reference_id,
+                "reference_type": reference_type,
+                "gmail_message_id": gmail_message_id,
+            },
+        )
 
 
 class AlreadyExistsError(Exception):
