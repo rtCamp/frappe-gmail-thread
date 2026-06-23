@@ -12,6 +12,8 @@ def sync_emails():
         gaccount = frappe.get_doc("Gmail Account", gmail_account.name)
         if gaccount.refresh_token:
             user = gaccount.linked_user
+            if not frappe.get_value("User", user, "enabled"):
+                continue
             job_name = f"gmail_thread_sync_{user}"
             if not is_job_enqueued(job_name):
                 frappe.enqueue(
