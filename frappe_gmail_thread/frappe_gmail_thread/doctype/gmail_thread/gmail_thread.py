@@ -150,138 +150,187 @@ def sync(user=None):
     for label_id in label_ids:
         try:
             if not last_history_id:
-                # Initial sync: fetch all threads for the label
-                threads = (
-                    gmail.users()
-                    .threads()
-                    .list(userId="me", labelIds=label_id)
-                    .execute()
-                )
-                if "threads" not in threads:
-                    continue
-                for thread in threads["threads"][::-1]:
-                    thread_id = thread["id"]
-                    thread_data = (
-                        gmail.users().threads().get(userId="me", id=thread_id).execute()
-                    )
-                    gmail_thread = find_gmail_thread(thread_id)
-                    for message in thread_data["messages"]:
-                        # Track max history id
-                        msg_history_id = int(message.get("historyId", 0))
-                        if msg_history_id > max_history_id:
-                            max_history_id = msg_history_id
-                        try:
-                            raw_email = (
-                                gmail.users()
-                                .messages()
-                                .get(userId="me", id=message["id"], format="raw")
-                                .execute()
-                            )
-                        except googleapiclient.errors.HttpError as e:
-                            if hasattr(e, "error_details"):
-                                for error in e.error_details:
-                                    if error.get("reason") == "notFound":
-                                        break
-                            else:
-                                raise e
-                            continue
-                        result = process_message(
-                            raw_email,
-                            message,
-                            gmail_account,
-                            thread_id,
-                            gmail_thread=gmail_thread,
-                            set_owner=True,
-                            commit=True,
-                        )
-                        if result:
-                            gmail_thread = result
+                # Initial sync: import every message in the label
+                label_max = sync_threads(gmail, gmail_account, label_id)
+                if label_max > max_history_id:
+                    max_history_id = label_max
                 gmail_account.reload()
                 gmail_account.last_historyid = max_history_id
                 gmail_account.save(ignore_permissions=True)
                 frappe.db.commit()  # nosemgrep
             else:
-                # Incremental sync using history API
-                try:
-                    history = (
-                        gmail.users()
-                        .history()
-                        .list(
-                            userId="me",
-                            startHistoryId=last_history_id,
-                            historyTypes=["messageAdded", "labelAdded"],
-                            labelId=label_id,
-                        )
-                        .execute()
-                    )
-                except googleapiclient.errors.HttpError as e:
-                    # If notFound, update historyid to the value returned by API (if any)
-                    # You won't find history id in error, so just reset to 0 and let next sync do initial sync
-                    if hasattr(e, "error_details"):
-                        for error in e.error_details:
-                            if error.get("reason") == "notFound":
-                                gmail_account.last_historyid = 0
-                                gmail_account.save(ignore_permissions=True)
-                                frappe.db.commit()
-                                return
-                    raise e
-
-                new_history_id = int(history.get("historyId", last_history_id))
-                if new_history_id > max_history_id:
-                    max_history_id = new_history_id
-                updated_docs = set()
-                if "history" in history:
-                    for hist in history["history"]:
-                        for message in hist.get("messages", []):
-                            try:
-                                raw_email = (
-                                    gmail.users()
-                                    .messages()
-                                    .get(userId="me", id=message["id"], format="raw")
-                                    .execute()
-                                )
-                            except googleapiclient.errors.HttpError as e:
-                                if hasattr(e, "error_details"):
-                                    for error in e.error_details:
-                                        if error.get("reason") == "notFound":
-                                            break
-                                else:
-                                    raise e
-                                continue
-                            thread_id = message["threadId"]
-                            gmail_thread = find_gmail_thread(thread_id)
-                            gmail_thread = process_message(
-                                raw_email,
-                                message,
-                                gmail_account,
-                                thread_id,
-                                gmail_thread=gmail_thread,
-                            )
-                            if (
-                                gmail_thread
-                                and gmail_thread.reference_doctype
-                                and gmail_thread.reference_name
-                            ):
-                                updated_docs.add(
-                                    (
-                                        gmail_thread.reference_doctype,
-                                        gmail_thread.reference_name,
-                                    )
-                                )
+                # Incremental sync using the history API
+                result = sync_history(gmail, gmail_account, label_id, last_history_id)
+                if result is None:
+                    # Stored historyId is too old; reset to 0 so the next run
+                    # performs a full sync and pick up everything we missed.
+                    gmail_account.last_historyid = 0
+                    gmail_account.save(ignore_permissions=True)
+                    frappe.db.commit()  # nosemgrep
+                    return
+                label_max, updated_docs = result
+                if label_max > max_history_id:
+                    max_history_id = label_max
                 gmail_account.reload()
                 gmail_account.last_historyid = max_history_id
                 gmail_account.save(ignore_permissions=True)
                 frappe.db.commit()  # nosemgrep
-                if updated_docs:
-                    for doctype, docname in updated_docs:
-                        frappe.publish_realtime(
-                            "gthread_new_email",
-                            doctype=doctype,
-                            docname=docname,
-                        )
+                for doctype, docname in updated_docs:
+                    frappe.publish_realtime(
+                        "gthread_new_email",
+                        doctype=doctype,
+                        docname=docname,
+                    )
         except Exception:
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")
             continue
+
+
+def get_raw_message(gmail, message_id):
+    """Fetch a single message in raw format.
+
+    Returns the message resource (which carries ``id``, ``threadId``,
+    ``labelIds``, ``historyId`` and ``raw``), or ``None`` if the message can no
+    longer be fetched (e.g. it was deleted between listing and fetching).
+    """
+    try:
+        return (
+            gmail.users()
+            .messages()
+            .get(userId="me", id=message_id, format="raw")
+            .execute()
+        )
+    except googleapiclient.errors.HttpError as e:
+        if not hasattr(e, "error_details"):
+            raise e
+        # notFound / inaccessible message — skip it
+        return None
+
+
+def sync_threads(gmail, gmail_account, label_id):
+    """Initial sync for a label.
+
+    Lists all message ids for the label (following ``nextPageToken`` across
+    pages) and fetches each raw message directly. This avoids the previous
+    ``threads.get`` call per thread, since ``messages.list`` already returns the
+    ``threadId`` for every message.
+
+    Returns the maximum Gmail ``historyId`` seen.
+    """
+    max_history_id = 0
+
+    # Collect message stubs across all pages. messages.list returns newest
+    # first, so we process the reversed list (oldest first) to keep thread
+    # creation dates consistent.
+    message_stubs = []
+    page_token = None
+    while True:
+        response = (
+            gmail.users()
+            .messages()
+            .list(userId="me", labelIds=label_id, pageToken=page_token)
+            .execute()
+        )
+        message_stubs.extend(response.get("messages", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    for stub in reversed(message_stubs):
+        raw_email = get_raw_message(gmail, stub["id"])
+        if raw_email is None:
+            continue
+        msg_history_id = int(raw_email.get("historyId", 0))
+        if msg_history_id > max_history_id:
+            max_history_id = msg_history_id
+        thread_id = raw_email.get("threadId", stub.get("threadId"))
+        gmail_thread = find_gmail_thread(thread_id)
+        process_message(
+            raw_email,
+            raw_email,
+            gmail_account,
+            thread_id,
+            gmail_thread=gmail_thread,
+            set_owner=True,
+            commit=True,
+        )
+
+    return max_history_id
+
+
+def sync_history(gmail, gmail_account, label_id, start_history_id):
+    """Incremental sync for a label using the history API.
+
+    Pages through history collecting the unique set of added message ids (the
+    same message can be reported by multiple history records, e.g. both
+    ``messageAdded`` and ``labelAdded``) so each raw message is fetched only
+    once.
+
+    Returns a ``(max_history_id, updated_docs)`` tuple, or ``None`` if the
+    stored historyId is too old and a full re-sync is required.
+    """
+    max_history_id = start_history_id
+    # message_id -> thread_id, deduped across history records and pages
+    message_thread_ids = {}
+
+    page_token = None
+    while True:
+        try:
+            history = (
+                gmail.users()
+                .history()
+                .list(
+                    userId="me",
+                    startHistoryId=start_history_id,
+                    historyTypes=["messageAdded", "labelAdded"],
+                    labelId=label_id,
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+        except googleapiclient.errors.HttpError as e:
+            # notFound means the stored historyId has expired; signal a reset.
+            if hasattr(e, "error_details"):
+                for error in e.error_details:
+                    if error.get("reason") == "notFound":
+                        return None
+            raise e
+
+        new_history_id = int(history.get("historyId", start_history_id))
+        if new_history_id > max_history_id:
+            max_history_id = new_history_id
+
+        for hist in history.get("history", []):
+            for message in hist.get("messages", []):
+                message_thread_ids[message["id"]] = message["threadId"]
+
+        page_token = history.get("nextPageToken")
+        if not page_token:
+            break
+
+    updated_docs = set()
+    for message_id, thread_id in message_thread_ids.items():
+        raw_email = get_raw_message(gmail, message_id)
+        if raw_email is None:
+            continue
+        gmail_thread = find_gmail_thread(thread_id)
+        gmail_thread = process_message(
+            raw_email,
+            raw_email,
+            gmail_account,
+            thread_id,
+            gmail_thread=gmail_thread,
+        )
+        if (
+            gmail_thread
+            and gmail_thread.reference_doctype
+            and gmail_thread.reference_name
+        ):
+            updated_docs.add(
+                (gmail_thread.reference_doctype, gmail_thread.reference_name)
+            )
+
+    return max_history_id, updated_docs
 
 
 def process_message(
