@@ -14,9 +14,11 @@ def enable_pubsub_everyday():
         return
 
     gmail_accounts = frappe.get_all(
-        "Gmail Account", filters={"gmail_enabled": 1}, fields=["name"]
+        "Gmail Account", filters={"gmail_enabled": 1}, fields=["name", "linked_user"]
     )
     for gmail_account in gmail_accounts:
+        if not frappe.get_value("User", gmail_account.linked_user, "enabled"):
+            continue
         gaccount = frappe.get_doc("Gmail Account", gmail_account.name)
         try:
             enable_pubsub(gaccount)

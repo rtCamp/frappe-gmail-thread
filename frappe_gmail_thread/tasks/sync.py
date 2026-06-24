@@ -6,19 +6,17 @@ def sync_emails():
     gmail_accounts = frappe.get_all(
         "Gmail Account",
         filters={"gmail_enabled": 1},
-        fields=["name"],
+        fields=["refresh_token", "linked_user"],
     )
     for gmail_account in gmail_accounts:
-        gaccount = frappe.get_doc("Gmail Account", gmail_account.name)
-        if gaccount.refresh_token:
-            user = gaccount.linked_user
-            if not frappe.get_value("User", user, "enabled"):
+        if gmail_account.refresh_token:
+            if not frappe.get_value("User", gmail_account.linked_user, "enabled"):
                 continue
-            job_name = f"gmail_thread_sync_{user}"
+            job_name = f"gmail_thread_sync_{gmail_account.linked_user}"
             if not is_job_enqueued(job_name):
                 frappe.enqueue(
                     "frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread.sync",
-                    user=user,
+                    user=gmail_account.linked_user,
                     queue="long",
                     job_name=job_name,
                     job_id=job_name,
