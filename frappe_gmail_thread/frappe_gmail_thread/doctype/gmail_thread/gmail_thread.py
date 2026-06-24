@@ -2,6 +2,9 @@
 # For license information, please see license.txt
 
 
+import random
+import time
+
 import frappe
 import frappe.share
 import googleapiclient.errors
@@ -20,6 +23,155 @@ from frappe_gmail_thread.utils.helpers import (
 )
 
 SCOPES = "https://www.googleapis.com/auth/gmail.readonly"
+
+# --- Gmail API throughput tuning -------------------------------------------
+# messages.get raw responses are fetched in HTTP batches (one round-trip for
+# many ids) instead of one sequential call each. Batching cuts latency, not
+# quota — every sub-request still costs its units — so we also retry rate-limit
+# responses with backoff and pace each batch to stay under Gmail's per-user
+# quota budget.
+_BATCH_SIZE = 50  # sub-requests per batch round-trip (Gmail caps batches at ~100)
+_MAX_RETRIES = 5  # retries (with backoff) for a rate-limited call
+_QUOTA_UNITS_PER_SEC = 250  # Gmail's per-user budget; batches pace to this
+_MESSAGES_GET_UNITS = 5  # quota cost of one messages.get
+
+
+def _is_rate_limit_error(exc):
+    """True for Gmail's rate-limit responses (HTTP 429, or a 403 rate-limit reason)."""
+    if not isinstance(exc, googleapiclient.errors.HttpError):
+        return False
+    status = getattr(exc.resp, "status", None)
+    if status == 429:
+        return True
+    if status != 403:
+        return False
+    # A 403 is a rate-limit signal only for specific reasons; other 403s
+    # (e.g. insufficient permissions) must not be retried. Prefer the structured
+    # error reason, but fall back to a substring match since error_details is
+    # not reliably populated across googleapiclient versions.
+    details = getattr(exc, "error_details", None)
+    if isinstance(details, list):
+        for detail in details:
+            if isinstance(detail, dict) and detail.get("reason") in (
+                "rateLimitExceeded",
+                "userRateLimitExceeded",
+            ):
+                return True
+    text = str(exc).lower()
+    return "ratelimitexceeded" in text or "rate limit" in text
+
+
+def _is_not_found_error(exc):
+    """True when a message can no longer be fetched (deleted between list and get)."""
+    if not isinstance(exc, googleapiclient.errors.HttpError):
+        return False
+    if getattr(exc.resp, "status", None) == 404:
+        return True
+    details = getattr(exc, "error_details", None)
+    if isinstance(details, list):
+        for detail in details:
+            if isinstance(detail, dict) and detail.get("reason") == "notFound":
+                return True
+    return False
+
+
+def _is_transient_error(exc):
+    """True for transient Gmail server errors worth retrying (5xx / backendError).
+
+    e.g. ``503 "The service is currently unavailable." (reason: backendError)`` —
+    Google's guidance is to retry these with backoff, not to drop the message.
+    """
+    if not isinstance(exc, googleapiclient.errors.HttpError):
+        return False
+    if getattr(exc.resp, "status", None) in (500, 502, 503, 504):
+        return True
+    details = getattr(exc, "error_details", None)
+    if isinstance(details, list):
+        for detail in details:
+            if isinstance(detail, dict) and detail.get("reason") in (
+                "backendError",
+                "internalError",
+            ):
+                return True
+    return False
+
+
+def _is_retryable_error(exc):
+    """Rate-limit or transient server error — both worth a backoff retry."""
+    return _is_rate_limit_error(exc) or _is_transient_error(exc)
+
+
+def _sleep_backoff(attempt):
+    """Exponential backoff with jitter: ~1s, 2s, 4s … capped at ~64s."""
+    time.sleep(min(2**attempt, 64) + random.uniform(0, 1))
+
+
+def batch_get_raw_messages(gmail, message_ids):
+    """Fetch many messages in raw format via batched ``messages.get`` calls.
+
+    - Bundles up to ``_BATCH_SIZE`` calls per HTTP round-trip instead of one
+      sequential request per id.
+    - Retries rate-limited ids with exponential backoff (a single retry budget,
+      not per-batch, so it can't compound).
+    - Paces each batch to the per-user quota budget to avoid bursting into 429s.
+    - ``notFound`` (deleted) messages are skipped; anything still failing after
+      retries is logged — never silently dropped.
+
+    Returns ``{message_id: raw_message}`` for every id that was fetched.
+    """
+    results = {}
+    pending = list(message_ids)
+    for attempt in range(_MAX_RETRIES + 1):
+        if not pending:
+            break
+        errors = {}
+
+        def _cb(request_id, response, exception):
+            if exception is not None:
+                errors[request_id] = exception
+            else:
+                results[request_id] = response
+
+        for i in range(0, len(pending), _BATCH_SIZE):
+            chunk = pending[i : i + _BATCH_SIZE]
+            batch = gmail.new_batch_http_request()
+            for message_id in chunk:
+                batch.add(
+                    gmail.users()
+                    .messages()
+                    .get(userId="me", id=message_id, format="raw"),
+                    callback=_cb,
+                    request_id=message_id,
+                )
+            try:
+                batch.execute()
+            except googleapiclient.errors.HttpError as e:
+                # The batch request as a whole failed, so no callbacks fired.
+                # Re-queue the chunk if the error is retryable; otherwise re-raise.
+                if not _is_retryable_error(e):
+                    raise
+                for message_id in chunk:
+                    errors.setdefault(message_id, e)
+            # Spread this batch's quota cost over time to avoid a burst.
+            time.sleep(len(chunk) * _MESSAGES_GET_UNITS / _QUOTA_UNITS_PER_SEC)
+
+        # Retry rate-limited AND transient (5xx/backendError) ids; skip notFound;
+        # log the rest. Without this a one-off 503 would drop the message.
+        pending = [mid for mid, exc in errors.items() if _is_retryable_error(exc)]
+        for mid, exc in errors.items():
+            if mid not in pending and not _is_not_found_error(exc):
+                frappe.log_error(
+                    title="Gmail batch fetch error", message=f"{mid}: {exc}"
+                )
+        if pending and attempt < _MAX_RETRIES:
+            _sleep_backoff(attempt)
+
+    if pending:
+        frappe.log_error(
+            title="Gmail batch fetch gave up",
+            message=f"{len(pending)} message(s) still failing after retries",
+        )
+    return results
 
 
 class GmailThread(Document):
@@ -143,101 +295,92 @@ def sync(user=None):
     if not label_ids:
         return
 
-    # Always store the maximum history id seen, to avoid skipping emails
     last_history_id = int(gmail_account.last_historyid or 0)
     max_history_id = last_history_id
 
+    # Gate on initial_sync_complete, NOT last_historyid: a partial initial run
+    # writes a historyId, and gating on that would flip later runs into
+    # incremental mode and skip the rest of the backlog forever.
+    if not int(gmail_account.initial_sync_complete or 0):
+        run_initial_sync(gmail, gmail_account, label_ids, max_history_id)
+        return
+
     for label_id in label_ids:
         try:
-            if not last_history_id:
-                # Initial sync: import every message in the label
-                label_max = sync_threads(gmail, gmail_account, label_id)
-                if label_max > max_history_id:
-                    max_history_id = label_max
-                gmail_account.reload()
-                gmail_account.last_historyid = max_history_id
-                gmail_account.save(ignore_permissions=True)
+            # Incremental sync using the history API
+            result = sync_history(gmail, gmail_account, label_id, last_history_id)
+            if result is None:
+                # Stored historyId is too old; force a fresh (checkpointed)
+                # initial sync next run so we pick up everything we missed.
+                frappe.db.set_value(
+                    "Gmail Account",
+                    gmail_account.name,
+                    {
+                        "last_historyid": 0,
+                        "initial_sync_complete": 0,
+                        "initial_sync_state": "",
+                    },
+                    update_modified=False,
+                )
                 frappe.db.commit()  # nosemgrep
-            else:
-                # Incremental sync using the history API
-                result = sync_history(gmail, gmail_account, label_id, last_history_id)
-                if result is None:
-                    # Stored historyId is too old; reset to 0 so the next run
-                    # performs a full sync and pick up everything we missed.
-                    gmail_account.last_historyid = 0
-                    gmail_account.save(ignore_permissions=True)
-                    frappe.db.commit()  # nosemgrep
-                    return
-                label_max, updated_docs = result
-                if label_max > max_history_id:
-                    max_history_id = label_max
-                gmail_account.reload()
-                gmail_account.last_historyid = max_history_id
-                gmail_account.save(ignore_permissions=True)
-                frappe.db.commit()  # nosemgrep
-                for doctype, docname in updated_docs:
-                    frappe.publish_realtime(
-                        "gthread_new_email",
-                        doctype=doctype,
-                        docname=docname,
-                    )
+                return
+            label_max, updated_docs = result
+            if label_max > max_history_id:
+                max_history_id = label_max
+            gmail_account.reload()
+            gmail_account.last_historyid = max_history_id
+            gmail_account.save(ignore_permissions=True)
+            frappe.db.commit()  # nosemgrep
+            for doctype, docname in updated_docs:
+                frappe.publish_realtime(
+                    "gthread_new_email",
+                    doctype=doctype,
+                    docname=docname,
+                )
         except Exception:
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")
             continue
 
 
-def get_raw_message(gmail, message_id):
-    """Fetch a single message in raw format.
+def _checkpoint_initial_sync(account_name, max_history_id, next_state):
+    """Persist initial-sync progress and commit immediately so a crash can't lose it.
 
-    Returns the message resource (which carries ``id``, ``threadId``,
-    ``labelIds``, ``historyId`` and ``raw``), or ``None`` if the message can no
-    longer be fetched (e.g. it was deleted between listing and fetching).
+    ``next_state`` is the ``{"label_id", "page_token"}`` dict to resume from, or
+    ``None`` once every label is done — in which case the initial sync is marked
+    complete and the next run switches to incremental mode.
     """
-    try:
-        return (
-            gmail.users()
-            .messages()
-            .get(userId="me", id=message_id, format="raw")
-            .execute()
-        )
-    except googleapiclient.errors.HttpError as e:
-        if not hasattr(e, "error_details"):
-            raise e
-        # notFound / inaccessible message — skip it
-        return None
+    values = {
+        "last_historyid": max_history_id,
+        "initial_sync_state": frappe.as_json(next_state) if next_state else "",
+    }
+    if next_state is None:
+        values["initial_sync_complete"] = 1
+    frappe.db.set_value("Gmail Account", account_name, values, update_modified=False)
+    frappe.db.commit()  # nosemgrep
 
 
-def sync_threads(gmail, gmail_account, label_id):
-    """Initial sync for a label.
+def sync_threads_page(gmail, gmail_account, label_id, page_token):
+    """Fetch and persist a single ``messages.list`` page during initial sync.
 
-    Lists all message ids for the label (following ``nextPageToken`` across
-    pages) and fetches each raw message directly. This avoids the previous
-    ``threads.get`` call per thread, since ``messages.list`` already returns the
-    ``threadId`` for every message.
-
-    Returns the maximum Gmail ``historyId`` seen.
+    Returns ``(max_history_id_on_page, next_page_token)``. ``messages.list``
+    returns newest-first, so the page is processed oldest-first to keep thread
+    creation dates chronological. Only one page of raw emails is held in memory
+    at a time.
     """
+    response = (
+        gmail.users()
+        .messages()
+        .list(userId="me", labelIds=label_id, pageToken=page_token)
+        .execute(num_retries=_MAX_RETRIES)
+    )
+    stubs = response.get("messages", [])
+    next_page_token = response.get("nextPageToken")
+
+    raw_by_id = batch_get_raw_messages(gmail, [s["id"] for s in stubs])
+
     max_history_id = 0
-
-    # Collect message stubs across all pages. messages.list returns newest
-    # first, so we process the reversed list (oldest first) to keep thread
-    # creation dates consistent.
-    message_stubs = []
-    page_token = None
-    while True:
-        response = (
-            gmail.users()
-            .messages()
-            .list(userId="me", labelIds=label_id, pageToken=page_token)
-            .execute()
-        )
-        message_stubs.extend(response.get("messages", []))
-        page_token = response.get("nextPageToken")
-        if not page_token:
-            break
-
-    for stub in reversed(message_stubs):
-        raw_email = get_raw_message(gmail, stub["id"])
+    for stub in reversed(stubs):
+        raw_email = raw_by_id.get(stub["id"])
         if raw_email is None:
             continue
         msg_history_id = int(raw_email.get("historyId", 0))
@@ -255,7 +398,59 @@ def sync_threads(gmail, gmail_account, label_id):
             commit=True,
         )
 
-    return max_history_id
+    return max_history_id, next_page_token
+
+
+def run_initial_sync(gmail, gmail_account, label_ids, max_history_id):
+    """Import the backlog for every enabled label, page by page.
+
+    The resume point (current label + its next page token) is checkpointed after
+    every page and committed immediately, so a run killed by the worker timeout
+    resumes from the last finished page instead of re-fetching the whole label.
+    """
+    state = frappe.parse_json(gmail_account.initial_sync_state or "{}")
+    resume_label_id = state.get("label_id")
+    resume_page_token = state.get("page_token")
+    if resume_label_id in label_ids:
+        start_idx = label_ids.index(resume_label_id)
+    else:
+        # Checkpointed label is no longer enabled (or no checkpoint yet) — start
+        # from the first label. Re-imports are deduped, skipping labels is not.
+        start_idx = 0
+        resume_page_token = None
+
+    for label_idx in range(start_idx, len(label_ids)):
+        label_id = label_ids[label_idx]
+        # Use the saved page token only for the label we actually stopped on.
+        page_token = resume_page_token if label_id == resume_label_id else None
+        resume_page_token = None
+
+        while True:
+            try:
+                page_max, next_page_token = sync_threads_page(
+                    gmail, gmail_account, label_id, page_token
+                )
+            except Exception:
+                # Log and stop without advancing the checkpoint, so the next run
+                # retries this same page rather than skipping the backlog.
+                frappe.log_error(frappe.get_traceback(), "Gmail Initial Sync Error")
+                return
+
+            if page_max > max_history_id:
+                max_history_id = page_max
+
+            # Persist where the next run should resume.
+            if next_page_token:
+                next_state = {"label_id": label_id, "page_token": next_page_token}
+            elif label_idx + 1 < len(label_ids):
+                next_state = {"label_id": label_ids[label_idx + 1], "page_token": None}
+            else:
+                next_state = None  # every label finished
+            _checkpoint_initial_sync(gmail_account.name, max_history_id, next_state)
+
+            page_token = next_page_token
+            if not page_token:
+                break  # this label is done
 
 
 def sync_history(gmail, gmail_account, label_id, start_history_id):
@@ -286,7 +481,7 @@ def sync_history(gmail, gmail_account, label_id, start_history_id):
                     labelId=label_id,
                     pageToken=page_token,
                 )
-                .execute()
+                .execute(num_retries=_MAX_RETRIES)
             )
         except googleapiclient.errors.HttpError as e:
             # notFound means the stored historyId has expired; signal a reset.
@@ -308,9 +503,12 @@ def sync_history(gmail, gmail_account, label_id, start_history_id):
         if not page_token:
             break
 
+    # Batch-fetch every raw message in one set of round-trips.
+    raw_by_id = batch_get_raw_messages(gmail, list(message_thread_ids.keys()))
+
     updated_docs = set()
     for message_id, thread_id in message_thread_ids.items():
-        raw_email = get_raw_message(gmail, message_id)
+        raw_email = raw_by_id.get(message_id)
         if raw_email is None:
             continue
         gmail_thread = find_gmail_thread(thread_id)
