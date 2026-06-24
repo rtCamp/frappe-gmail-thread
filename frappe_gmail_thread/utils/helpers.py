@@ -151,7 +151,7 @@ def collect_reference_ids(email_object, thread_id=None):
     def _add(value, ref_type):
         if not value:
             return
-        value = value.strip()
+        value = value.strip(" <>")
         if value and value not in seen:
             seen.add(value)
             refs.append((value, ref_type))
@@ -169,8 +169,7 @@ def collect_reference_ids(email_object, thread_id=None):
         header_values.extend(in_reply_to.split())
 
     for raw in header_values:
-        message_id = raw.strip(" <>")
-        _add(message_id, "Message-ID")
+        _add(raw, "Message-ID")
 
     return refs
 
