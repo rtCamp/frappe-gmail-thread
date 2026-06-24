@@ -246,8 +246,6 @@ def get_gmail_object(gmail_account):
     credentials = google.oauth2.credentials.Credentials(**credentials_dict)
     gmail = build(serviceName="gmail", version="v1", credentials=credentials)
 
-    check_gmail_object(account, gmail)
-
     return gmail
 
 

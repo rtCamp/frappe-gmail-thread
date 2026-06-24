@@ -15,6 +15,7 @@
   "authorization_code",
   "refresh_token",
   "last_historyid",
+  "page_incremental_sync",
   "labels_to_sync_section",
   "labels"
  ],
@@ -58,6 +59,28 @@
    "fieldtype": "Int",
    "label": "Synced Upto (History ID)",
    "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "initial_sync_complete",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "label": "Initial Sync Complete",
+   "read_only": 1
+  },
+  {
+   "fieldname": "initial_sync_state",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Initial Sync State",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "description": "Import one page (~100 messages) of the backlog per scheduled sync run, resuming from the checkpoint next run, instead of running until done. Use this to spread a large initial sync across runs so other accounts get a turn.",
+   "fieldname": "page_incremental_sync",
+   "fieldtype": "Check",
+   "label": "Page Incremental Initial Sync"
   },
   {
    "depends_on": "eval:doc.gmail_enabled == true;",
