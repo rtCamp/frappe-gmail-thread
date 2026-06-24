@@ -165,8 +165,6 @@ def sync(user=None):
                         gmail.users().threads().get(userId="me", id=thread_id).execute()
                     )
                     gmail_thread = find_gmail_thread(thread_id)
-                    involved_users = set()
-                    email = None
                     for message in thread_data["messages"]:
                         # Track max history id
                         msg_history_id = int(message.get("historyId", 0))
@@ -187,88 +185,17 @@ def sync(user=None):
                             else:
                                 raise e
                             continue
-                        if "DRAFT" in raw_email.get("labelIds", []):
-                            continue
-                        is_new_thread = False
-                        try:
-                            email, email_object = create_new_email(
-                                raw_email, gmail_account
-                            )
-                        except AlreadyExistsError:
-                            continue
-                        if not gmail_thread:
-                            email_message_id = email_object.message_id
-                            email_references = email_object.mail.get("References")
-                            if email_references:
-                                email_references = [
-                                    get_string_between("<", x, ">")
-                                    for x in email_references.split()
-                                ]
-                            else:
-                                email_references = []
-                            gmail_thread = find_gmail_thread(
-                                thread_id, [email_message_id] + email_references
-                            )
-                        if gmail_thread:
-                            gmail_thread.reload()
-                        else:
-                            gmail_thread = frappe.new_doc("Gmail Thread")
-                            gmail_thread.gmail_thread_id = thread_id
-                            gmail_thread.gmail_account = gmail_account.name
-                            is_new_thread = True
-                        if not gmail_thread.subject_of_first_mail:
-                            gmail_thread.subject_of_first_mail = email.subject
-                        if gmail_thread.creation is None or get_datetime(
-                            email.date_and_time
-                        ) < get_datetime(gmail_thread.creation):
-                            is_new_thread = True
-                        involved_users.add(email_object.from_email)
-                        for recipient in email_object.to:
-                            involved_users.add(recipient)
-                        for recipient in email_object.cc:
-                            involved_users.add(recipient)
-                        for recipient in email_object.bcc:
-                            involved_users.add(recipient)
-                        involved_users.add(gmail_account.linked_user)
-                        update_involved_users(gmail_thread, involved_users)
-                        process_attachments(email, gmail_thread, email_object)
-                        replace_inline_images(email, email_object)
-                        add_thread_references(
-                            gmail_thread,
-                            email_object,
-                            thread_id=thread_id,
-                            gmail_message_id=message["id"],
+                        result = process_message(
+                            raw_email,
+                            message,
+                            gmail_account,
+                            thread_id,
+                            gmail_thread=gmail_thread,
+                            set_owner=True,
+                            commit=True,
                         )
-                        pos = get_email_insert_position(
-                            gmail_thread.emails or [], email
-                        )
-                        gmail_thread.append("emails", email, position=pos)
-                        latest_dt = gmail_thread.emails[-1].date_and_time
-                        gmail_thread.save(ignore_permissions=True)
-                        frappe.db.commit()  # nosemgrep
-                        frappe.db.set_value(
-                            "Gmail Thread",
-                            gmail_thread.name,
-                            "modified",
-                            latest_dt,
-                            update_modified=False,
-                        )
-                        if is_new_thread:  # update creation date
-                            frappe.db.set_value(
-                                "Gmail Thread",
-                                gmail_thread.name,
-                                "creation",
-                                email.date_and_time,
-                                update_modified=False,
-                            )
-                        frappe.db.set_value(
-                            "Gmail Thread",
-                            gmail_thread.name,
-                            "owner",
-                            gmail_account.linked_user,
-                            modified_by=gmail_account.linked_user,
-                            update_modified=False,
-                        )
+                        if result:
+                            gmail_thread = result
                 gmail_account.reload()
                 gmail_account.last_historyid = max_history_id
                 gmail_account.save(ignore_permissions=True)
@@ -321,82 +248,18 @@ def sync(user=None):
                                 else:
                                     raise e
                                 continue
-                            if "DRAFT" in raw_email.get("labelIds", []):
-                                continue
                             thread_id = message["threadId"]
                             gmail_thread = find_gmail_thread(thread_id)
-                            involved_users = set()
-                            is_new_thread = False
-                            try:
-                                email, email_object = create_new_email(
-                                    raw_email, gmail_account
-                                )
-                            except AlreadyExistsError:
-                                continue
-                            if not gmail_thread:
-                                email_message_id = email_object.message_id
-                                email_references = email_object.mail.get("References")
-                                if email_references:
-                                    email_references = [
-                                        get_string_between("<", x, ">")
-                                        for x in email_references.split()
-                                    ]
-                                else:
-                                    email_references = []
-                                gmail_thread = find_gmail_thread(
-                                    thread_id, [email_message_id] + email_references
-                                )
-                            if not gmail_thread:
-                                gmail_thread = frappe.new_doc("Gmail Thread")
-                                gmail_thread.gmail_thread_id = thread_id
-                                gmail_thread.gmail_account = gmail_account.name
-                                is_new_thread = True
-                            if not gmail_thread.subject_of_first_mail:
-                                gmail_thread.subject_of_first_mail = email.subject
-                            if gmail_thread.creation is None or get_datetime(
-                                email.date_and_time
-                            ) < get_datetime(gmail_thread.creation):
-                                is_new_thread = True
-                            involved_users.add(email_object.from_email)
-                            for recipient in email_object.to:
-                                involved_users.add(recipient)
-                            for recipient in email_object.cc:
-                                involved_users.add(recipient)
-                            for recipient in email_object.bcc:
-                                involved_users.add(recipient)
-                            involved_users.add(gmail_account.linked_user)
-                            update_involved_users(gmail_thread, involved_users)
-                            process_attachments(email, gmail_thread, email_object)
-                            replace_inline_images(email, email_object)
-                            add_thread_references(
-                                gmail_thread,
-                                email_object,
-                                thread_id=thread_id,
-                                gmail_message_id=message["id"],
+                            gmail_thread = process_message(
+                                raw_email,
+                                message,
+                                gmail_account,
+                                thread_id,
+                                gmail_thread=gmail_thread,
                             )
-                            pos = get_email_insert_position(
-                                gmail_thread.emails or [], email
-                            )
-                            gmail_thread.append("emails", email, position=pos)
-                            latest_dt = gmail_thread.emails[-1].date_and_time
-                            gmail_thread.save(ignore_permissions=True)
-                            frappe.db.set_value(
-                                "Gmail Thread",
-                                gmail_thread.name,
-                                "modified",
-                                latest_dt,
-                                update_modified=False,
-                            )
-                            if is_new_thread:  # update creation date
-                                frappe.db.set_value(
-                                    "Gmail Thread",
-                                    gmail_thread.name,
-                                    "creation",
-                                    email.date_and_time,
-                                    update_modified=False,
-                                )
                             if (
-                                gmail_thread.reference_doctype
+                                gmail_thread
+                                and gmail_thread.reference_doctype
                                 and gmail_thread.reference_name
                             ):
                                 updated_docs.add(
@@ -419,6 +282,119 @@ def sync(user=None):
         except Exception:
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")
             continue
+
+
+def process_message(
+    raw_email,
+    message,
+    gmail_account,
+    thread_id,
+    gmail_thread=None,
+    set_owner=False,
+    commit=False,
+):
+    """Create the email from a raw Gmail message and append it to its Gmail Thread.
+
+    Args:
+        raw_email: The raw message payload returned by the Gmail API.
+        message: The Gmail message dict (used for ``message["id"]``).
+        gmail_account: The Gmail Account document being synced.
+        thread_id: The Gmail thread id this message belongs to.
+        gmail_thread: A pre-fetched Gmail Thread document (looked up by thread id),
+            or ``None`` to resolve/create it here.
+        set_owner: Whether to set the thread owner to the linked user.
+        commit: Whether to commit after saving the thread.
+
+    Returns:
+        The saved Gmail Thread document, or ``None`` if the message was skipped
+        (a draft or an email that already exists).
+    """
+    if "DRAFT" in raw_email.get("labelIds", []):
+        return None
+
+    try:
+        email, email_object = create_new_email(raw_email, gmail_account)
+    except AlreadyExistsError:
+        return None
+
+    if not gmail_thread:
+        email_message_id = email_object.message_id
+        email_references = email_object.mail.get("References")
+        if email_references:
+            email_references = [
+                get_string_between("<", x, ">") for x in email_references.split()
+            ]
+        else:
+            email_references = []
+        gmail_thread = find_gmail_thread(
+            thread_id, [email_message_id] + email_references
+        )
+
+    is_new_thread = False
+    if gmail_thread:
+        gmail_thread.reload()
+    else:
+        gmail_thread = frappe.new_doc("Gmail Thread")
+        gmail_thread.gmail_thread_id = thread_id
+        gmail_thread.gmail_account = gmail_account.name
+        is_new_thread = True
+
+    if not gmail_thread.subject_of_first_mail:
+        gmail_thread.subject_of_first_mail = email.subject
+    if gmail_thread.creation is None or get_datetime(
+        email.date_and_time
+    ) < get_datetime(gmail_thread.creation):
+        is_new_thread = True
+
+    involved_users = set()
+    involved_users.add(email_object.from_email)
+    for recipient in email_object.to:
+        involved_users.add(recipient)
+    for recipient in email_object.cc:
+        involved_users.add(recipient)
+    for recipient in email_object.bcc:
+        involved_users.add(recipient)
+    involved_users.add(gmail_account.linked_user)
+    update_involved_users(gmail_thread, involved_users)
+    process_attachments(email, gmail_thread, email_object)
+    replace_inline_images(email, email_object)
+    add_thread_references(
+        gmail_thread,
+        email_object,
+        thread_id=thread_id,
+        gmail_message_id=message["id"],
+    )
+    pos = get_email_insert_position(gmail_thread.emails or [], email)
+    gmail_thread.append("emails", email, position=pos)
+    latest_dt = gmail_thread.emails[-1].date_and_time
+    gmail_thread.save(ignore_permissions=True)
+    if commit:
+        frappe.db.commit()  # nosemgrep
+    frappe.db.set_value(
+        "Gmail Thread",
+        gmail_thread.name,
+        "modified",
+        latest_dt,
+        update_modified=False,
+    )
+    if is_new_thread:  # update creation date
+        frappe.db.set_value(
+            "Gmail Thread",
+            gmail_thread.name,
+            "creation",
+            email.date_and_time,
+            update_modified=False,
+        )
+    if set_owner:
+        frappe.db.set_value(
+            "Gmail Thread",
+            gmail_thread.name,
+            "owner",
+            gmail_account.linked_user,
+            modified_by=gmail_account.linked_user,
+            update_modified=False,
+        )
+    return gmail_thread
 
 
 def update_involved_users(doc, involved_users):
