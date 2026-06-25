@@ -4,6 +4,8 @@ import json
 import frappe
 from frappe.utils.background_jobs import is_job_enqueued
 
+from frappe_gmail_thread.utils.queues import get_gmail_thread_sync_queue_name
+
 
 @frappe.whitelist(allow_guest=True)  # nosemgrep
 def callback():
@@ -26,18 +28,21 @@ def callback():
             return "OK"
         email_address = message.get("emailAddress")
         user = frappe.get_doc(
-            "User", {"email": email_address, "user_type": "System User"}
+            "User", {"email": email_address, "user_type": "System User", "enabled": 1}
         )
         if not user:
             return "OK"
         history_id = message.get("historyId")
-        if email_address and history_id:
+        gmail_enabled = frappe.get_value(
+            "Gmail Account", {"linked_user": user.name}, "gmail_enabled"
+        )
+        if email_address and history_id and gmail_enabled:
             job_name = f"gmail_thread_sync_{user.name}"
             if not is_job_enqueued(job_name):
                 frappe.enqueue(
                     "frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread.sync",
                     user=user.name,
-                    queue="long",
+                    queue=get_gmail_thread_sync_queue_name(),
                     job_name=job_name,
                     job_id=job_name,
                 )

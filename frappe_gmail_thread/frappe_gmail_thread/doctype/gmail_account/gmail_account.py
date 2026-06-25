@@ -10,6 +10,7 @@ from frappe_gmail_thread.api.oauth import disable_pubsub, enable_pubsub
 from frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread import (
     sync_labels,
 )
+from frappe_gmail_thread.utils.queues import get_gmail_thread_sync_queue_name
 
 
 class GmailAccount(Document):
@@ -147,7 +148,7 @@ def sync_labels_api(args: str | dict | None = None, doc_name: str | None = None)
         frappe.enqueue(
             "frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread.sync",
             user=doc.linked_user,
-            queue="long",
+            queue=get_gmail_thread_sync_queue_name(),
             job_name=job_name,
             job_id=job_name,
         )
