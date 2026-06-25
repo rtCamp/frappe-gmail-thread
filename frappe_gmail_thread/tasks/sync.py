@@ -1,6 +1,8 @@
 import frappe
 from frappe.utils.background_jobs import is_job_enqueued
 
+from frappe_gmail_thread.utils.helpers import get_sync_queue
+
 
 def sync_emails():
     gmail_accounts = frappe.get_all(
@@ -17,7 +19,7 @@ def sync_emails():
                 frappe.enqueue(
                     "frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread.sync",
                     user=gmail_account.linked_user,
-                    queue="long",
+                    queue=get_sync_queue(),
                     job_name=job_name,
                     job_id=job_name,
                 )

@@ -335,3 +335,16 @@ def process_attachments(new_email, gmail_thread, email_object):
             # same file attached twice??
             pass
     new_email.attachments_data = json.dumps(attachments)
+
+
+SYNC_QUEUE = "gmail_sync"
+SYNC_QUEUE_FALLBACK = "long"
+
+
+def get_sync_queue():
+    """Return the queue to enqueue Gmail sync jobs on."""
+    from frappe.utils.background_jobs import get_queues_timeout
+
+    if SYNC_QUEUE in get_queues_timeout():
+        return SYNC_QUEUE
+    return SYNC_QUEUE_FALLBACK
