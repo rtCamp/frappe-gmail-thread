@@ -4,7 +4,7 @@ import json
 import frappe
 from frappe.utils.background_jobs import is_job_enqueued
 
-from frappe_gmail_thread.utils.helpers import get_sync_queue
+from frappe_gmail_thread.utils.queues import get_sync_queue
 
 
 @frappe.whitelist(allow_guest=True)  # nosemgrep
