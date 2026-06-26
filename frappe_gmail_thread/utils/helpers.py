@@ -121,7 +121,8 @@ def find_gmail_thread(thread_id, message_ids: list = None):
                     limit=1,
                 )
                 if ref_parents:
-                    gmail_thread = frappe.get_doc("Gmail Thread", ref_parents[0])
+                    return frappe.get_doc("Gmail Thread", ref_parents[0])
+
             except frappe.DoesNotExistError:
                 pass
 
