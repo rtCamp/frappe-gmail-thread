@@ -127,6 +127,28 @@ def sync_labels(account_name: str | Document, should_save: bool = True):
         gmail_account.save(ignore_permissions=True)
 
 
+def get_rfc_message_id(message):
+    """Extract the RFC 5322 ``Message-ID`` header from a Gmail message payload."""
+    headers = (message.get("payload") or {}).get("headers") or []
+    for header in headers:
+        if (header.get("name") or "").lower() == "message-id":
+            return get_string_between("<", header.get("value") or "", ">")
+    return None
+
+
+def gmail_message_exists(gmail_message_id, rfc_message_id=None):
+    """Return True if this message was already imported."""
+    if gmail_message_id and frappe.db.exists(
+        "Single Email CT", {"gmail_message_id": gmail_message_id}
+    ):
+        return True
+    if rfc_message_id and frappe.db.exists(
+        "Single Email CT", {"email_message_id": rfc_message_id}
+    ):
+        return True
+    return False
+
+
 def sync(user=None):
     if user:
         frappe.set_user(user)  # nosemgrep:
@@ -172,6 +194,10 @@ def sync(user=None):
                         msg_history_id = int(message.get("historyId", 0))
                         if msg_history_id > max_history_id:
                             max_history_id = msg_history_id
+                        if gmail_message_exists(
+                            message["id"], get_rfc_message_id(message)
+                        ):
+                            continue
                         try:
                             raw_email = (
                                 gmail.users()
@@ -306,6 +332,10 @@ def sync(user=None):
                 if "history" in history:
                     for hist in history["history"]:
                         for message in hist.get("messages", []):
+                            if gmail_message_exists(
+                                message["id"], get_rfc_message_id(message)
+                            ):
+                                continue
                             try:
                                 raw_email = (
                                     gmail.users()
