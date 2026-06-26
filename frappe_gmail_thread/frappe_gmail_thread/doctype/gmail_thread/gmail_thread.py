@@ -2,6 +2,8 @@
 # For license information, please see license.txt
 
 
+from email.utils import getaddresses
+
 import frappe
 import frappe.share
 import googleapiclient.errors
@@ -136,6 +138,18 @@ def get_rfc_message_id(message):
     return None
 
 
+def get_message_participants(message):
+    """Extract sender/recipient addresses from a Gmail message payload."""
+    headers = (message.get("payload") or {}).get("headers") or []
+    participants = set()
+    for header in headers:
+        if (header.get("name") or "").lower() in ("from", "to", "cc", "bcc"):
+            for _name, address in getaddresses([header.get("value") or ""]):
+                if address:
+                    participants.add(address)
+    return participants
+
+
 def gmail_message_exists(gmail_message_id, rfc_message_id=None):
     """Return True if this message was already imported."""
     if gmail_message_id and frappe.db.exists(
@@ -197,6 +211,22 @@ def sync(user=None):
                         if gmail_message_exists(
                             message["id"], get_rfc_message_id(message)
                         ):
+                            if gmail_thread:
+                                participants = get_message_participants(message)
+                                participants.add(gmail_account.linked_user)
+                                before = len(gmail_thread.involved_users)
+                                update_involved_users(gmail_thread, participants)
+                                if len(gmail_thread.involved_users) != before:
+                                    prev_modified = gmail_thread.modified
+                                    gmail_thread.save(ignore_permissions=True)
+                                    frappe.db.commit()  # nosemgrep
+                                    frappe.db.set_value(
+                                        "Gmail Thread",
+                                        gmail_thread.name,
+                                        "modified",
+                                        prev_modified,
+                                        update_modified=False,
+                                    )
                             continue
                         try:
                             raw_email = (
@@ -406,7 +436,7 @@ def sync(user=None):
                             gmail_thread.append("emails", email, position=pos)
                             latest_dt = gmail_thread.emails[-1].date_and_time
                             gmail_thread.save(ignore_permissions=True)
-                            # Do we need frappe.commit() here?
+                            frappe.db.commit()  # nosemgrep
                             frappe.db.set_value(
                                 "Gmail Thread",
                                 gmail_thread.name,
