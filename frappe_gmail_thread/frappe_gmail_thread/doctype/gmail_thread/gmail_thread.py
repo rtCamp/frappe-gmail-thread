@@ -332,10 +332,6 @@ def sync(user=None):
                 if "history" in history:
                     for hist in history["history"]:
                         for message in hist.get("messages", []):
-                            if gmail_message_exists(
-                                message["id"], get_rfc_message_id(message)
-                            ):
-                                continue
                             try:
                                 raw_email = (
                                     gmail.users()
@@ -410,6 +406,7 @@ def sync(user=None):
                             gmail_thread.append("emails", email, position=pos)
                             latest_dt = gmail_thread.emails[-1].date_and_time
                             gmail_thread.save(ignore_permissions=True)
+                            # Do we need frappe.commit() here?
                             frappe.db.set_value(
                                 "Gmail Thread",
                                 gmail_thread.name,
