@@ -445,7 +445,6 @@ def sync(user=None):
                             gmail_thread.append("emails", email, position=pos)
                             latest_dt = gmail_thread.emails[-1].date_and_time
                             gmail_thread.save(ignore_permissions=True)
-                            frappe.db.commit()  # nosemgrep
                             frappe.db.set_value(
                                 "Gmail Thread",
                                 gmail_thread.name,
