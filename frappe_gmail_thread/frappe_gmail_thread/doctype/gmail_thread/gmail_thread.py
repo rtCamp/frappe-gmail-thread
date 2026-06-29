@@ -2,6 +2,8 @@
 # For license information, please see license.txt
 
 
+from email.utils import getaddresses
+
 import frappe
 import frappe.share
 import googleapiclient.errors
@@ -127,6 +129,46 @@ def sync_labels(account_name: str | Document, should_save: bool = True):
         gmail_account.save(ignore_permissions=True)
 
 
+def get_message_headers(message):
+    """Map a Gmail message payload's headers to a ``{lower_name: value}`` dict."""
+    headers = (message.get("payload") or {}).get("headers") or []
+    return {
+        (header.get("name") or "").lower(): (header.get("value") or "")
+        for header in headers
+    }
+
+
+def get_rfc_message_id(headers):
+    """Extract the RFC 5322 ``Message-ID`` from a ``{lower_name: value}`` header dict."""
+    if "message-id" in headers:
+        return get_string_between("<", headers["message-id"], ">")
+    return None
+
+
+def get_message_participants(headers):
+    """Extract sender/recipient addresses from a ``{lower_name: value}`` header dict."""
+    participants = set()
+    for name in ("from", "to", "cc", "bcc"):
+        if name in headers:
+            for _name, address in getaddresses([headers[name]]):
+                if address:
+                    participants.add(address)
+    return participants
+
+
+def gmail_message_exists(gmail_message_id, rfc_message_id=None):
+    """Return True if this message was already imported."""
+    if gmail_message_id and frappe.db.exists(
+        "Single Email CT", {"gmail_message_id": gmail_message_id}
+    ):
+        return True
+    if rfc_message_id and frappe.db.exists(
+        "Single Email CT", {"email_message_id": rfc_message_id}
+    ):
+        return True
+    return False
+
+
 def sync(user=None):
     if user:
         frappe.set_user(user)  # nosemgrep:
@@ -168,10 +210,33 @@ def sync(user=None):
                     involved_users = set()
                     email = None
                     for message in thread_data["messages"]:
+                        # Build the header lookup once per message and reuse it
+                        message_headers = get_message_headers(message)
                         # Track max history id
                         msg_history_id = int(message.get("historyId", 0))
                         if msg_history_id > max_history_id:
                             max_history_id = msg_history_id
+                        if gmail_message_exists(
+                            message["id"], get_rfc_message_id(message_headers)
+                        ):
+                            if gmail_thread:
+                                gmail_thread.reload()
+                                participants = get_message_participants(message_headers)
+                                participants.add(gmail_account.linked_user)
+                                before = len(gmail_thread.involved_users)
+                                update_involved_users(gmail_thread, participants)
+                                if len(gmail_thread.involved_users) != before:
+                                    prev_modified = gmail_thread.modified
+                                    gmail_thread.save(ignore_permissions=True)
+                                    frappe.db.commit()  # nosemgrep
+                                    frappe.db.set_value(
+                                        "Gmail Thread",
+                                        gmail_thread.name,
+                                        "modified",
+                                        prev_modified,
+                                        update_modified=False,
+                                    )
+                            continue
                         try:
                             raw_email = (
                                 gmail.users()

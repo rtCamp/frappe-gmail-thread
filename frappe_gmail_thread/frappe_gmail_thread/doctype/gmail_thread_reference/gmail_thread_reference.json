@@ -13,6 +13,7 @@
   {
    "fieldname": "reference_id",
    "fieldtype": "Data",
+   "length": 900,
    "in_list_view": 1,
    "label": "Reference ID",
    "reqd": 1,
@@ -29,6 +30,7 @@
   {
    "fieldname": "gmail_message_id",
    "fieldtype": "Data",
+   "length": 900,
    "label": "Source Gmail Message ID"
   }
  ],
