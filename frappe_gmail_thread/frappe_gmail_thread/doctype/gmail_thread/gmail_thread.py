@@ -129,22 +129,28 @@ def sync_labels(account_name: str | Document, should_save: bool = True):
         gmail_account.save(ignore_permissions=True)
 
 
-def get_rfc_message_id(message):
-    """Extract the RFC 5322 ``Message-ID`` header from a Gmail message payload."""
+def get_message_headers(message):
+    """Map a Gmail message payload's headers to a ``{lower_name: value}`` dict."""
     headers = (message.get("payload") or {}).get("headers") or []
-    for header in headers:
-        if (header.get("name") or "").lower() == "message-id":
-            return get_string_between("<", header.get("value") or "", ">")
+    return {
+        (header.get("name") or "").lower(): (header.get("value") or "")
+        for header in headers
+    }
+
+
+def get_rfc_message_id(headers):
+    """Extract the RFC 5322 ``Message-ID`` from a ``{lower_name: value}`` header dict."""
+    if "message-id" in headers:
+        return get_string_between("<", headers["message-id"], ">")
     return None
 
 
-def get_message_participants(message):
-    """Extract sender/recipient addresses from a Gmail message payload."""
-    headers = (message.get("payload") or {}).get("headers") or []
+def get_message_participants(headers):
+    """Extract sender/recipient addresses from a ``{lower_name: value}`` header dict."""
     participants = set()
-    for header in headers:
-        if (header.get("name") or "").lower() in ("from", "to", "cc", "bcc"):
-            for _name, address in getaddresses([header.get("value") or ""]):
+    for name in ("from", "to", "cc", "bcc"):
+        if name in headers:
+            for _name, address in getaddresses([headers[name]]):
                 if address:
                     participants.add(address)
     return participants
@@ -204,15 +210,17 @@ def sync(user=None):
                     involved_users = set()
                     email = None
                     for message in thread_data["messages"]:
+                        # Build the header lookup once per message and reuse it
+                        message_headers = get_message_headers(message)
                         # Track max history id
                         msg_history_id = int(message.get("historyId", 0))
                         if msg_history_id > max_history_id:
                             max_history_id = msg_history_id
                         if gmail_message_exists(
-                            message["id"], get_rfc_message_id(message)
+                            message["id"], get_rfc_message_id(message_headers)
                         ):
                             if gmail_thread:
-                                participants = get_message_participants(message)
+                                participants = get_message_participants(message_headers)
                                 participants.add(gmail_account.linked_user)
                                 before = len(gmail_thread.involved_users)
                                 update_involved_users(gmail_thread, participants)
