@@ -220,6 +220,7 @@ def sync(user=None):
                             message["id"], get_rfc_message_id(message_headers)
                         ):
                             if gmail_thread:
+                                gmail_thread.reload()
                                 participants = get_message_participants(message_headers)
                                 participants.add(gmail_account.linked_user)
                                 before = len(gmail_thread.involved_users)
