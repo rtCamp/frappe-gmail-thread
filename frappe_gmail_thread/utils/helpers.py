@@ -109,18 +109,22 @@ def find_gmail_thread(thread_id, message_ids: list = None):
         candidate_ids = [thread_id] + (message_ids or [])
         candidate_ids = [x for x in candidate_ids if x]
         if candidate_ids:
-            ref_parents = frappe.get_all(
-                "Gmail Thread Reference",
-                filters={
-                    "reference_id": ["in", candidate_ids],
-                    "parenttype": "Gmail Thread",
-                    "parentfield": "references",
-                },
-                pluck="parent",
-                limit=1,
-            )
-            if ref_parents:
-                return frappe.get_doc("Gmail Thread", ref_parents[0])
+            try:
+                ref_parents = frappe.get_all(
+                    "Gmail Thread Reference",
+                    filters={
+                        "reference_id": ["in", candidate_ids],
+                        "parenttype": "Gmail Thread",
+                        "parentfield": "references",
+                    },
+                    pluck="parent",
+                    limit=1,
+                )
+                if ref_parents:
+                    return frappe.get_doc("Gmail Thread", ref_parents[0])
+
+            except frappe.DoesNotExistError:
+                pass
 
         # for old threads, check if any of the message_ids are already in Single Email CT
         if message_ids:
