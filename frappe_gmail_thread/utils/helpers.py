@@ -338,4 +338,9 @@ def process_attachments(new_email, gmail_thread, email_object):
         except frappe.DuplicateEntryError:
             # same file attached twice??
             pass
+        except Exception:
+            frappe.log_error(
+                title="Gmail Thread: failed to save attachment",
+                message=f"{attachment.get('fname')}\n\n{frappe.get_traceback()}",
+            )
     new_email.attachments_data = json.dumps(attachments)
