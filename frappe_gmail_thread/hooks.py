@@ -138,6 +138,9 @@ has_permission = {
 # override_doctype_class = {
 # 	"ToDo": "custom_app.overrides.CustomToDo"
 # }
+extend_doctype_class = {
+    "File": ["frappe_gmail_thread.overrides.file.GmailThreadAttachmentTolerance"]
+}
 
 # Document Events
 # ---------------
