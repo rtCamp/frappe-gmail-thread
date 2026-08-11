@@ -6,7 +6,12 @@ import frappe
 from frappe.tests import IntegrationTestCase, change_settings
 
 from frappe_gmail_thread.api.pubsub import callback
-from frappe_gmail_thread.tests import TEST_USER, make_test_user
+from frappe_gmail_thread.tests import (
+    TEST_USER,
+    as_user,
+    make_test_gmail_account,
+    make_test_user,
+)
 
 PUBSUB_MODULE = "frappe_gmail_thread.api.pubsub"
 
@@ -23,6 +28,10 @@ class TestPubsubCallback(IntegrationTestCase):
     def setUpClass(cls):
         super().setUpClass()
         make_test_user(TEST_USER)
+        frappe.db.set_value("User", TEST_USER, "enabled", 1)
+        with as_user(TEST_USER):
+            account = make_test_gmail_account(linked_user=TEST_USER)
+        frappe.db.set_value("Gmail Account", account.name, "gmail_enabled", 1)
 
     def test_returns_ok_without_enqueue_when_google_settings_disabled(self):
         """callback returns 'OK' without enqueuing when Google Settings.enable=0."""

@@ -86,6 +86,17 @@ def _make_http_error(reason):
     return err
 
 
+def _configure_mock_child_tables(mock_doc, *fieldnames):
+    """Make selected child tables on a document mock support ``append`` calls."""
+    for fieldname in fieldnames:
+        setattr(mock_doc, fieldname, [])
+
+    def append(fieldname, value, **_kwargs):
+        getattr(mock_doc, fieldname).append(value)
+
+    mock_doc.append.side_effect = append
+
+
 class TestGmailThreadStatus(_GmailThreadTestCase):
     @classmethod
     def setUpClass(cls):
@@ -571,6 +582,8 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
         mock_thread.reference_doctype = None
         mock_thread.reference_name = None
         mock_thread.subject_of_first_mail = "Hi"
+        mock_thread.creation = None
+        _configure_mock_child_tables(mock_thread, "emails", "references")
         mock_email = MagicMock(subject="Hi", date_and_time="2026-01-01 10:00:00")
         mock_email_object = SimpleNamespace(
             message_id="mid-iu",
@@ -623,6 +636,8 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
         mock_thread.reference_doctype = "User"
         mock_thread.reference_name = TEST_USER
         mock_thread.subject_of_first_mail = "Hello"
+        mock_thread.creation = None
+        _configure_mock_child_tables(mock_thread, "emails", "references")
         mock_email = MagicMock(subject="Hello", date_and_time="2026-01-01 10:00:00")
         mock_email_object = SimpleNamespace(
             message_id="mid-link",
