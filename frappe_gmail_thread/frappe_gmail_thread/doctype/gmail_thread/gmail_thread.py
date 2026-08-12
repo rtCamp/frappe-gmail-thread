@@ -10,6 +10,7 @@ import googleapiclient.errors
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import get_datetime, get_string_between
+from frappe.utils.caching import request_cache
 
 from frappe_gmail_thread.api.oauth import get_gmail_object
 from frappe_gmail_thread.utils.helpers import (
@@ -527,28 +528,63 @@ def get_email_insert_position(gmail_list, email):
     return low
 
 
+@request_cache
 def get_permission_query_conditions(user):
+    from frappe.database.query import Engine
+
     if not user:
         user = frappe.session.user
     if user == "Administrator":
         return ""
-    return """
-        `tabGmail Thread`.name in (
-            select parent from `tabInvolved User`
-            where account = {user}
-        ) or `tabGmail Thread`.owner = {user}
-    """.format(user=frappe.db.escape(user))
+
+    escaped_user = frappe.db.escape(user)
+    conditions = [
+        f"`tabGmail Thread`.owner = {escaped_user}",
+        f"""`tabGmail Thread`.name in (
+            select parent from `tabInvolved User` where account = {escaped_user}
+        )""",
+    ]
+
+    reference_doctypes = frappe.get_all(
+        "Gmail Thread",
+        filters={"reference_doctype": ("is", "set")},
+        pluck="reference_doctype",
+        distinct=True,
+    )
+    for doctype in reference_doctypes:
+        try:
+            engine = Engine()
+            engine.get_query(doctype, user=user, db_query_compat=True)
+            match_conditions = engine.build_match_conditions()
+        except frappe.PermissionError:
+            continue  # user cannot read the reference doctype at all
+
+        clause = f"`tabGmail Thread`.reference_doctype = {frappe.db.escape(doctype)}"
+        if match_conditions:
+            table = doctype.replace("`", "")
+            clause += f""" and `tabGmail Thread`.reference_name in (
+                select `tab{table}`.name from `tab{table}` where {match_conditions}
+            )"""
+        conditions.append(f"({clause})")
+
+    return " or ".join(conditions)
 
 
 def has_permission(doc, ptype, user):
     if user == "Administrator":
         return True
     if ptype in ("read", "write", "delete", "create"):
-        return (
+        if (
             frappe.db.exists(
                 "Involved User",
                 {"parent": doc.name, "account": user},
             )
             is not None
-        )
+        ):
+            return True
+        if doc.reference_doctype and doc.reference_name:
+            return frappe.has_permission(
+                doc.reference_doctype, ptype, doc.reference_name, user=user
+            )
+
     return False
