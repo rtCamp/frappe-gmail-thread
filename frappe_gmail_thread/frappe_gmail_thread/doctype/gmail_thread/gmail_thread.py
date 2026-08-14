@@ -545,7 +545,7 @@ def get_permission_query_conditions(user):
         )""",
     ]
 
-    reference_doctypes = frappe.get_all(
+    reference_doctypes = frappe.db.get_all(
         "Gmail Thread",
         filters={"reference_doctype": ("is", "set")},
         pluck="reference_doctype",
@@ -567,7 +567,7 @@ def get_permission_query_conditions(user):
             )"""
         conditions.append(f"({clause})")
 
-    return " or ".join(conditions)
+    return f"({' or '.join(conditions)})"
 
 
 def has_permission(doc, ptype, user):
