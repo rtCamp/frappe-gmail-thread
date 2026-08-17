@@ -536,12 +536,12 @@ def get_permission_query_conditions(user):
 
     doctype_with_read_access = get_doctypes_with_read(user)
 
-    return """
+    return """(
       `tabGmail Thread`.name in (
             select parent from `tabInvolved User`
             where account = {user}
         ) or `tabGmail Thread`.owner = {user} or `tabGmail Thread`.reference_doctype in ({doctypes})
-    """.format(
+    )""".format(
         user=frappe.db.escape(user),
         doctypes=", ".join([frappe.db.escape(d) for d in doctype_with_read_access]),
     )
