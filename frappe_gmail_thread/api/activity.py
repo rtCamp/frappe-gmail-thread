@@ -34,7 +34,7 @@ def get_attachments_data(email):
     if file_doc_names:
         file_url_by_name = {
             r["name"]: r["file_url"]
-            for r in frappe.db.get_all(
+            for r in frappe.get_list(
                 "File",
                 filters={"name": ("in", list(file_doc_names))},
                 fields=["name", "file_url"],
@@ -56,9 +56,9 @@ def get_attachments_data(email):
     return valid
 
 
-@frappe.whitelist()
 def get_linked_gmail_threads(doctype: str, docname: str | int):
-    gmail_threads = frappe.get_all(
+    frappe.has_permission(doctype, "read", doc=docname, throw=True)
+    gmail_threads = frappe.get_list(
         "Gmail Thread",
         filters={
             "reference_doctype": doctype,
@@ -67,7 +67,7 @@ def get_linked_gmail_threads(doctype: str, docname: str | int):
     )
     data = []
     for thread in gmail_threads:
-        thread = frappe.get_doc("Gmail Thread", thread.name)
+        thread = frappe.get_doc("Gmail Thread", thread.name, check_permission="read")
         for email in thread.emails:
             t_data = {
                 "icon": "mail",
@@ -123,8 +123,11 @@ def get_linked_gmail_threads(doctype: str, docname: str | int):
     return data
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def relink_gmail_thread(name: str | int, doctype: str, docname: str | int):
+    # the link decides who may read the thread, so the caller must hold the
+    # target's write permission, not merely the thread's
+    frappe.has_permission(doctype, "write", doc=docname, throw=True)
     thread = frappe.get_doc("Gmail Thread", name)
     thread.reference_doctype = doctype
     thread.reference_name = docname
@@ -132,7 +135,7 @@ def relink_gmail_thread(name: str | int, doctype: str, docname: str | int):
     return thread.reference_name
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def unlink_gmail_thread(name: str | int):
     thread = frappe.get_doc("Gmail Thread", name)
     thread.reference_doctype = None

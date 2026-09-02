@@ -4,6 +4,7 @@
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.rate_limiter import rate_limit
 from frappe.utils.background_jobs import is_job_enqueued
 
 from frappe_gmail_thread.api.oauth import disable_pubsub, enable_pubsub
@@ -129,7 +130,8 @@ class GmailAccount(Document):
                     frappe.msgprint(_("Please select at least one label."))
 
 
-@frappe.whitelist()  # nosemgrep
+@frappe.whitelist(methods=["POST"])
+@rate_limit(key="doc_name", limit=10, seconds=3600)
 def sync_labels_api(args: str | dict | None = None, doc_name: str | None = None):
     if args:
         if isinstance(args, str):
@@ -137,7 +139,7 @@ def sync_labels_api(args: str | dict | None = None, doc_name: str | None = None)
         doc_name = doc_name or args.get("doc_name")
     if not args and not doc_name:
         frappe.throw(_("doc_name is required"))
-    doc = frappe.get_doc("Gmail Account", doc_name)
+    doc = frappe.get_doc("Gmail Account", doc_name, check_permission="write")
     if args and args.get("reset_historyid", False):
         doc.last_historyid = 0
         doc.save()
