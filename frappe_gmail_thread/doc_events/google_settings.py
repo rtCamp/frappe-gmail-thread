@@ -11,7 +11,7 @@ def on_update(doc, method=None):
         )
         for gmail_account in gmail_accounts:
             gdoc = frappe.get_doc("Gmail Account", gmail_account.name)
-            if gdoc.custom_gmail_sync_in_realtime:
+            if doc.custom_gmail_sync_in_realtime:
                 # start pubsub
                 enable_pubsub(gdoc)
             else:
