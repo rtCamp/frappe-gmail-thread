@@ -128,7 +128,7 @@ def relink_gmail_thread(name: str | int, doctype: str, docname: str | int):
     # the link decides who may read the thread, so the caller must hold the
     # target's write permission, not merely the thread's
     frappe.has_permission(doctype, "write", doc=docname, throw=True)
-    thread = frappe.get_doc("Gmail Thread", name)
+    thread = frappe.get_doc("Gmail Thread", name, check_permission="write")
     thread.reference_doctype = doctype
     thread.reference_name = docname
     thread.save()
