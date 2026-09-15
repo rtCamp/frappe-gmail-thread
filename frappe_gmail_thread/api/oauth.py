@@ -105,13 +105,20 @@ def authorize_access(user, code=None, reauthorize=None):
                 frappe.db.commit()  # nosemgrep: Committing manually because it's a part of a GET request
 
             frappe.local.response["type"] = "redirect"
-            frappe.local.response[
-                "location"
-            ] = f"/app/gmail-account/{quote(gmail_account.name)}"
+            frappe.local.response["location"] = (
+                f"/app/gmail-account/{quote(gmail_account.name)}"
+            )
 
             frappe.msgprint(_("Gmail has been configured."))
-        except Exception as e:
-            frappe.throw(e)
+        except Exception:
+            frappe.log_error(
+                title="Gmail Thread: OAuth authorization failed",
+                message=frappe.get_traceback(),
+            )
+            frappe.throw(
+                _("Could not complete Gmail authorization. Please try again."),
+                frappe.ValidationError,
+            )
 
 
 @frappe.whitelist()

@@ -288,7 +288,7 @@ class TestSyncLabels(_GmailThreadTestCase):
             patch.object(account, "save") as mock_save,
         ):
             sync_labels(account, should_save=True)
-        mock_save.assert_called_once_with(ignore_permissions=True)
+        mock_save.assert_called_once_with()
 
 
 class TestUpdateInvolvedUsers(_GmailThreadTestCase):

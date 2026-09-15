@@ -109,7 +109,9 @@ class GmailThread(Document):
 @frappe.whitelist(methods=["POST"])
 def sync_labels(account_name: str | Document, should_save: bool = True):
     if isinstance(account_name, str):
-        gmail_account = frappe.get_doc("Gmail Account", account_name)
+        gmail_account = frappe.get_doc(
+            "Gmail Account", account_name, check_permission="write"
+        )
     else:
         gmail_account = account_name
 
@@ -127,7 +129,7 @@ def sync_labels(account_name: str | Document, should_save: bool = True):
             "labels", {"label_id": label["id"], "label_name": label["name"]}
         )
     if should_save:
-        gmail_account.save(ignore_permissions=True)
+        gmail_account.save()
 
 
 def get_message_headers(message):
