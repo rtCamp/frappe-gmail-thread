@@ -1,6 +1,7 @@
 import base64
 import json
 import re
+from collections import Counter
 from uuid import uuid4
 
 import frappe
@@ -103,28 +104,26 @@ def html_to_text(html):
 def find_gmail_thread(thread_id, message_ids: list = None):
     try:
         gmail_thread = frappe.get_doc("Gmail Thread", {"gmail_thread_id": thread_id})
-    except frappe.DoesNotExistError:
-        gmail_thread = None
 
         candidate_ids = [thread_id] + (message_ids or [])
         candidate_ids = [x for x in candidate_ids if x]
         if candidate_ids:
-            try:
-                ref_parents = frappe.get_all(
-                    "Gmail Thread Reference",
-                    filters={
-                        "reference_id": ["in", candidate_ids],
-                        "parenttype": "Gmail Thread",
-                        "parentfield": "references",
-                    },
-                    pluck="parent",
-                    limit=1,
-                )
-                if ref_parents:
-                    return frappe.get_doc("Gmail Thread", ref_parents[0])
+            ref_parents = frappe.get_all(
+                "Gmail Thread Reference",
+                filters={
+                    "reference_id": ["in", candidate_ids],
+                    "parenttype": "Gmail Thread",
+                    "parentfield": "references",
+                },
+                pluck="parent",
+            )
+            if ref_parents:
+                counter = Counter(ref_parents)
+                max_parent = counter.most_common(1)[0][0]
+                return frappe.get_doc("Gmail Thread", max_parent)
 
-            except frappe.DoesNotExistError:
-                pass
+    except frappe.DoesNotExistError:
+        gmail_thread = None
 
         # for old threads, check if any of the message_ids are already in Single Email CT
         if message_ids:

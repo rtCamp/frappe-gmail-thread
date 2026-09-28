@@ -33,6 +33,7 @@
    "fieldtype": "Link",
    "label": "Reference Document Type",
    "mandatory_depends_on": "reference_name",
+   "in_global_index": 1,
    "options": "DocType"
   },
   {
@@ -40,6 +41,7 @@
    "fieldtype": "Dynamic Link",
    "label": "Reference Name",
    "mandatory_depends_on": "reference_doctype",
+   "in_global_index": 1,
    "options": "reference_doctype"
   },
   {
