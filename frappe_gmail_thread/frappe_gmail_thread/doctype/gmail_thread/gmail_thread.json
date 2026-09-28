@@ -33,16 +33,16 @@
    "fieldtype": "Link",
    "label": "Reference Document Type",
    "mandatory_depends_on": "reference_name",
-   "in_global_index": 1,
-   "options": "DocType"
+   "options": "DocType",
+   "search_index": 1
   },
   {
    "fieldname": "reference_name",
    "fieldtype": "Dynamic Link",
    "label": "Reference Name",
    "mandatory_depends_on": "reference_doctype",
-   "in_global_index": 1,
-   "options": "reference_doctype"
+   "options": "reference_doctype",
+   "search_index": 1
   },
   {
    "fieldname": "reference_owner",
@@ -119,7 +119,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2024-12-24 20:06:51.533156",
+ "modified": "2026-09-28 23:43:40.666158",
  "modified_by": "Administrator",
  "module": "Frappe Gmail Thread",
  "name": "Gmail Thread",

@@ -1,7 +1,6 @@
 import base64
 import json
 import re
-from collections import Counter
 from uuid import uuid4
 
 import frappe
@@ -102,30 +101,25 @@ def html_to_text(html):
 
 
 def find_gmail_thread(thread_id, message_ids: list = None):
+    # references beat thread_id: thread_id is per-mailbox
+    candidate_ids = [x for x in [thread_id, *(message_ids or [])] if x]
+    if candidate_ids:
+        ref_parents = frappe.get_all(
+            "Gmail Thread Reference",
+            filters={
+                "reference_id": ["in", candidate_ids],
+                "parenttype": "Gmail Thread",
+                "parentfield": "references",
+            },
+            pluck="parent",
+        )
+        if ref_parents:
+            return frappe.get_doc("Gmail Thread", _dominant_thread(ref_parents))
+
     try:
-        gmail_thread = frappe.get_doc("Gmail Thread", {"gmail_thread_id": thread_id})
-
-        candidate_ids = [thread_id] + (message_ids or [])
-        candidate_ids = [x for x in candidate_ids if x]
-        if candidate_ids:
-            ref_parents = frappe.get_all(
-                "Gmail Thread Reference",
-                filters={
-                    "reference_id": ["in", candidate_ids],
-                    "parenttype": "Gmail Thread",
-                    "parentfield": "references",
-                },
-                pluck="parent",
-            )
-            if ref_parents:
-                counter = Counter(ref_parents)
-                max_parent = counter.most_common(1)[0][0]
-                return frappe.get_doc("Gmail Thread", max_parent)
-
+        return frappe.get_doc("Gmail Thread", {"gmail_thread_id": thread_id})
     except frappe.DoesNotExistError:
-        gmail_thread = None
-
-        # for old threads, check if any of the message_ids are already in Single Email CT
+        # legacy fallback: match by message_id in Single Email CT
         if message_ids:
             for message_id in message_ids:
                 try:
@@ -133,13 +127,35 @@ def find_gmail_thread(thread_id, message_ids: list = None):
                         "Single Email CT", {"email_message_id": message_id}
                     )
                     if single_email_ct:
-                        gmail_thread = frappe.get_doc(
-                            "Gmail Thread", single_email_ct.parent
-                        )
-                        break
+                        return frappe.get_doc("Gmail Thread", single_email_ct.parent)
                 except frappe.DoesNotExistError:
                     pass
-    return gmail_thread
+    return None
+
+
+def _dominant_thread(ref_parents):
+    # multiple matches: most references wins, oldest breaks ties
+    unique_parents = set(ref_parents)
+    if len(unique_parents) == 1:
+        return next(iter(unique_parents))
+
+    counts = frappe.get_all(
+        "Gmail Thread Reference",
+        filters={
+            "parent": ["in", list(unique_parents)],
+            "parenttype": "Gmail Thread",
+            "parentfield": "references",
+        },
+        fields=[
+            "parent",
+            {"COUNT": "name", "as": "reference_count"},
+            {"MIN": "creation", "as": "oldest_reference"},
+        ],
+        group_by="parent",
+        order_by="reference_count desc, oldest_reference asc",
+        limit=1,
+    )
+    return counts[0].parent
 
 
 def collect_reference_ids(email_object, thread_id=None):
@@ -198,6 +214,38 @@ def add_thread_references(
 
 class AlreadyExistsError(Exception):
     pass
+
+
+def merge_duplicate_email(email_object, gmail_account):
+    # for_update: a plain read here can miss the winner's commit (this
+    # transaction's snapshot predates it); retry once on QueryDeadlockError,
+    # since 3+ accounts racing the same row can deadlock InnoDB
+    try:
+        parent = frappe.db.get_value(
+            "Single Email CT",
+            {"email_message_id": email_object.message_id},
+            "parent",
+            for_update=True,
+        )
+        gmail_thread = frappe.get_doc("Gmail Thread", parent, for_update=True)
+    except frappe.QueryDeadlockError:
+        frappe.db.rollback()
+        parent = frappe.db.get_value(
+            "Single Email CT",
+            {"email_message_id": email_object.message_id},
+            "parent",
+            for_update=True,
+        )
+        gmail_thread = frappe.get_doc("Gmail Thread", parent, for_update=True)
+    involved_users_linked = [user.account for user in gmail_thread.involved_users]
+    if gmail_account.linked_user not in involved_users_linked:
+        gmail_thread.append(
+            "involved_users",
+            frappe.get_doc(doctype="Involved User", account=gmail_account.linked_user),
+        )
+        gmail_thread.save(ignore_permissions=True)
+        frappe.db.commit()  # nosemgrep
+    return gmail_thread
 
 
 def create_new_email(email, gmail_account):

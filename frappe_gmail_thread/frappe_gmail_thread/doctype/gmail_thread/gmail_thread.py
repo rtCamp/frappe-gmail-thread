@@ -18,6 +18,7 @@ from frappe_gmail_thread.utils.helpers import (
     add_thread_references,
     create_new_email,
     find_gmail_thread,
+    merge_duplicate_email,
     process_attachments,
     replace_inline_images,
 )
@@ -312,7 +313,14 @@ def sync(user=None):
                         )
                         gmail_thread.append("emails", email, position=pos)
                         latest_dt = gmail_thread.emails[-1].date_and_time
-                        gmail_thread.save(ignore_permissions=True)
+                        frappe.db.savepoint("gmail_thread_email_insert")
+                        try:
+                            gmail_thread.save(ignore_permissions=True)
+                        except frappe.UniqueValidationError:
+                            # another account's sync won the race for this message
+                            frappe.db.rollback(save_point="gmail_thread_email_insert")
+                            merge_duplicate_email(email_object, gmail_account)
+                            continue
                         frappe.db.commit()  # nosemgrep
                         frappe.db.set_value(
                             "Gmail Thread",
@@ -447,7 +455,16 @@ def sync(user=None):
                             )
                             gmail_thread.append("emails", email, position=pos)
                             latest_dt = gmail_thread.emails[-1].date_and_time
-                            gmail_thread.save(ignore_permissions=True)
+                            frappe.db.savepoint("gmail_thread_email_insert")
+                            try:
+                                gmail_thread.save(ignore_permissions=True)
+                            except frappe.UniqueValidationError:
+                                # another account's sync won the race for this message
+                                frappe.db.rollback(
+                                    save_point="gmail_thread_email_insert"
+                                )
+                                merge_duplicate_email(email_object, gmail_account)
+                                continue
                             frappe.db.set_value(
                                 "Gmail Thread",
                                 gmail_thread.name,
