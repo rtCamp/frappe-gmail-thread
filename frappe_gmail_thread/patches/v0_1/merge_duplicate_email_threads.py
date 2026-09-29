@@ -16,13 +16,19 @@ def execute():
         for group in _find_duplicate_message_ids():
             try:
                 _resolve_group(group.email_message_id)
-                frappe.db.commit()  # nosemgrep
             except Exception:
+                # merge logic hit an edge case — fall back to a guaranteed-
+                # safe rename so the unique constraint can still go in later
+                # in this same migrate run; the alternative (blocking the
+                # whole migration until a human fixes this one group) makes
+                # the constraint moot indefinitely. Still logged for review.
                 frappe.db.rollback()
                 frappe.log_error(
-                    title="Gmail Thread merge patch: group failed",
+                    title="Gmail Thread merge patch: falling back to rename for this group",
                     message=f"email_message_id {group.email_message_id!r}\n\n{frappe.get_traceback()}",
                 )
+                _force_disambiguate_group(group.email_message_id)
+            frappe.db.commit()  # nosemgrep
     finally:
         if added_index:
             frappe.db.sql_ddl(
@@ -54,6 +60,14 @@ def _find_duplicate_message_ids():
         .having(Count(single_email_ct.name) > 1)
         .run(as_dict=True)
     )
+
+
+def _force_disambiguate_group(message_id):
+    rows = frappe.get_all(
+        "Single Email CT", filters={"email_message_id": message_id}, fields=["name"]
+    )
+    for row in rows[1:]:
+        _disambiguate(row.name, message_id)
 
 
 def _resolve_group(message_id):
@@ -124,6 +138,9 @@ def _rank(candidates):
 
 
 def _disambiguate(single_email_ct_name, message_id):
+    # ponytail: one query per row; fine for the group sizes seen in practice
+    # (a handful of accounts/dirty duplicates per email_message_id) — batch
+    # this with a single CASE-based update if a group ever reaches hundreds+ rows
     frappe.db.set_value(
         "Single Email CT",
         single_email_ct_name,

@@ -319,9 +319,15 @@ def sync(user=None):
                         try:
                             gmail_thread.save(ignore_permissions=True)
                         except frappe.UniqueValidationError:
-                            # another account's sync won the race for this message
+                            # another account's sync won the race for this message.
+                            # gmail_thread persists across messages in this same
+                            # Gmail thread_id below — reassign it to the actual
+                            # winner, not the never-persisted doc that just failed,
+                            # so the next message here reloads/appends correctly
                             frappe.db.rollback(save_point="gmail_thread_email_insert")
-                            merge_duplicate_email(email_object, gmail_account)
+                            gmail_thread = merge_duplicate_email(
+                                email_object, gmail_account
+                            )
                             continue
                         frappe.db.commit()  # nosemgrep
                         frappe.db.set_value(
@@ -467,7 +473,9 @@ def sync(user=None):
                                 frappe.db.rollback(
                                     save_point="gmail_thread_email_insert"
                                 )
-                                merge_duplicate_email(email_object, gmail_account)
+                                gmail_thread = merge_duplicate_email(
+                                    email_object, gmail_account
+                                )
                                 continue
                             frappe.db.set_value(
                                 "Gmail Thread",
