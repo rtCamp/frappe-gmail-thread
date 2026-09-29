@@ -10,9 +10,19 @@ def execute():
     # so GROUP BY doesn't full-scan millions of rows, drop it when done
     added_index = _ensure_grouping_index()
     try:
+        # commit per group, not once at the end: real sites can have
+        # thousands of duplicate groups, and one giant transaction means a
+        # single bad group loses all prior progress and rolls back everything
         for group in _find_duplicate_message_ids():
-            _resolve_group(group.email_message_id)
-        frappe.db.commit()  # nosemgrep
+            try:
+                _resolve_group(group.email_message_id)
+                frappe.db.commit()  # nosemgrep
+            except Exception:
+                frappe.db.rollback()
+                frappe.log_error(
+                    title="Gmail Thread merge patch: group failed",
+                    message=f"email_message_id {group.email_message_id!r}\n\n{frappe.get_traceback()}",
+                )
     finally:
         if added_index:
             frappe.db.sql_ddl(
