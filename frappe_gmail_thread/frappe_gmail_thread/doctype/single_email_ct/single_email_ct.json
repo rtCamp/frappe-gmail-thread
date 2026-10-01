@@ -102,7 +102,9 @@
   },
   {
    "fieldname": "email_message_id",
-   "fieldtype": "Small Text",
+   "fieldtype": "Data",
+   "unique": 1,
+   "length": 400,
    "label": "Email Message ID",
    "read_only": 1
   },

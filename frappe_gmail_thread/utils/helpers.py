@@ -100,33 +100,40 @@ def html_to_text(html):
     return soup.get_text(separator=" ", strip=True)
 
 
+def _thread_by_references(candidate_ids):
+    if not candidate_ids:
+        return None
+    ref_parents = frappe.get_all(
+        "Gmail Thread Reference",
+        filters={
+            "reference_id": ["in", candidate_ids],
+            "parenttype": "Gmail Thread",
+            "parentfield": "references",
+        },
+        pluck="parent",
+    )
+    if not ref_parents:
+        return None
+    return frappe.get_doc("Gmail Thread", _dominant_thread(ref_parents))
+
+
 def find_gmail_thread(thread_id, message_ids: list = None):
+    # Message-ID references beat thread_id: thread_id is per-mailbox and a
+    # weaker signal, so it's only consulted once a real Message-ID match
+    # fails — two explicit phases, not a pooled query, so a thread_id can
+    # never outrank an actual Message-ID match against an unrelated thread
+    message_thread = _thread_by_references([x for x in (message_ids or []) if x])
+    if message_thread:
+        return message_thread
+
+    thread_id_thread = _thread_by_references([thread_id] if thread_id else [])
+    if thread_id_thread:
+        return thread_id_thread
+
     try:
-        gmail_thread = frappe.get_doc("Gmail Thread", {"gmail_thread_id": thread_id})
+        return frappe.get_doc("Gmail Thread", {"gmail_thread_id": thread_id})
     except frappe.DoesNotExistError:
-        gmail_thread = None
-
-        candidate_ids = [thread_id] + (message_ids or [])
-        candidate_ids = [x for x in candidate_ids if x]
-        if candidate_ids:
-            try:
-                ref_parents = frappe.get_all(
-                    "Gmail Thread Reference",
-                    filters={
-                        "reference_id": ["in", candidate_ids],
-                        "parenttype": "Gmail Thread",
-                        "parentfield": "references",
-                    },
-                    pluck="parent",
-                    limit=1,
-                )
-                if ref_parents:
-                    return frappe.get_doc("Gmail Thread", ref_parents[0])
-
-            except frappe.DoesNotExistError:
-                pass
-
-        # for old threads, check if any of the message_ids are already in Single Email CT
+        # legacy fallback: match by message_id in Single Email CT
         if message_ids:
             for message_id in message_ids:
                 try:
@@ -134,13 +141,35 @@ def find_gmail_thread(thread_id, message_ids: list = None):
                         "Single Email CT", {"email_message_id": message_id}
                     )
                     if single_email_ct:
-                        gmail_thread = frappe.get_doc(
-                            "Gmail Thread", single_email_ct.parent
-                        )
-                        break
+                        return frappe.get_doc("Gmail Thread", single_email_ct.parent)
                 except frappe.DoesNotExistError:
                     pass
-    return gmail_thread
+    return None
+
+
+def _dominant_thread(ref_parents):
+    # multiple matches: most references wins, oldest breaks ties
+    unique_parents = set(ref_parents)
+    if len(unique_parents) == 1:
+        return next(iter(unique_parents))
+
+    counts = frappe.get_all(
+        "Gmail Thread Reference",
+        filters={
+            "parent": ["in", list(unique_parents)],
+            "parenttype": "Gmail Thread",
+            "parentfield": "references",
+        },
+        fields=[
+            "parent",
+            {"COUNT": "name", "as": "reference_count"},
+            {"MIN": "creation", "as": "oldest_reference"},
+        ],
+        group_by="parent",
+        order_by="reference_count desc, oldest_reference asc",
+        limit=1,
+    )
+    return counts[0].parent
 
 
 def collect_reference_ids(email_object, thread_id=None):
@@ -201,12 +230,45 @@ class AlreadyExistsError(Exception):
     pass
 
 
+def merge_duplicate_email(email_object, gmail_account):
+    # for_update: a plain read here can miss the winner's commit (this
+    # transaction's snapshot predates it). Let QueryDeadlockError escape
+    # rather than retrying here: frappe.db.rollback() with no savepoint
+    # wipes the WHOLE transaction, including any earlier messages in this
+    # same sync batch that haven't committed yet — retrying in place would
+    # silently drop them while the batch keeps going. Letting it propagate
+    # aborts this sync() call untouched; last_historyid is never advanced,
+    # so the next poll safely retries the whole batch.
+    parent = frappe.db.get_value(
+        "Single Email CT",
+        {"email_message_id": email_object.message_id},
+        "parent",
+        for_update=True,
+    )
+    gmail_thread = frappe.get_doc("Gmail Thread", parent, for_update=True)
+    involved_users_linked = [user.account for user in gmail_thread.involved_users]
+    if gmail_account.linked_user not in involved_users_linked:
+        gmail_thread.append(
+            "involved_users",
+            frappe.get_doc(doctype="Involved User", account=gmail_account.linked_user),
+        )
+        gmail_thread.save(ignore_permissions=True)
+        frappe.db.commit()  # nosemgrep
+    return gmail_thread
+
+
 def create_new_email(email, gmail_account):
     # decode raw email with errors='replace' to avoid UnicodeDecodeError
     email_content = base64.urlsafe_b64decode(email["raw"].encode("ASCII")).decode(
         "utf-8", errors="replace"
     )
     email_object = GmailInboundMail(content=email_content, email_account=gmail_account)
+    if not email_object.message_id:
+        # no RFC Message-ID header (malformed/legacy senders) — a blank value
+        # would collide with every other header-less email under the unique
+        # constraint; synthesize one scoped to account + gmail id (gmail_message_id
+        # is already this table's own unique name, so this can't collide either)
+        email_object.message_id = f"no-message-id:{gmail_account.name}:{email['id']}"
     is_sent = False
     # check if there is a user (not website user) with the same email as the sender in frappe, if yes, then it is a sent email
     is_sent = (

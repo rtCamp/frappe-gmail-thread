@@ -7,7 +7,7 @@ from frappe.utils.background_jobs import is_job_enqueued
 from frappe_gmail_thread.utils.queues import get_gmail_thread_sync_queue_name
 
 
-@frappe.whitelist(allow_guest=True)  # nosemgrep
+@frappe.whitelist(allow_guest=True, methods=["POST"])  # nosemgrep
 def callback():
     data = frappe.request.get_data(as_text=True)
     data = frappe.parse_json(data)
