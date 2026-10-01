@@ -6,22 +6,15 @@ _TMP_INDEX = "email_message_id_dedup_tmp"
 
 
 def execute():
-    # runs pre_model_sync, before the real unique index exists; add a temp one
-    # so GROUP BY doesn't full-scan millions of rows, drop it when done
+
     added_index = _ensure_grouping_index()
     try:
-        # commit per group, not once at the end: real sites can have
-        # thousands of duplicate groups, and one giant transaction means a
-        # single bad group loses all prior progress and rolls back everything
+        _backfill_blank_message_ids()
+
         for group in _find_duplicate_message_ids():
             try:
                 _resolve_group(group.email_message_id)
             except Exception:
-                # merge logic hit an edge case — fall back to a guaranteed-
-                # safe rename so the unique constraint can still go in later
-                # in this same migrate run; the alternative (blocking the
-                # whole migration until a human fixes this one group) makes
-                # the constraint moot indefinitely. Still logged for review.
                 frappe.db.rollback()
                 frappe.log_error(
                     title="Gmail Thread merge patch: falling back to rename for this group",
@@ -45,6 +38,28 @@ def _ensure_grouping_index():
         f"alter table `tabSingle Email CT` add index `{_TMP_INDEX}` (email_message_id(191))"
     )
     return True
+
+
+def _backfill_blank_message_ids():
+    single_email_ct = DocType("Single Email CT")
+    rows = (
+        frappe.qb.from_(single_email_ct)
+        .select(single_email_ct.name, single_email_ct.gmail_message_id)
+        .where(
+            single_email_ct.email_message_id.isnull()
+            | (single_email_ct.email_message_id == "")
+        )
+        .run(as_dict=True)
+    )
+    for row in rows:
+        frappe.db.set_value(
+            "Single Email CT",
+            row.name,
+            "email_message_id",
+            row.gmail_message_id,
+            update_modified=False,
+        )
+    frappe.db.commit()  # nosemgrep
 
 
 def _find_duplicate_message_ids():
