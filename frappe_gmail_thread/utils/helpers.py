@@ -192,6 +192,9 @@ def collect_reference_ids(email_object, thread_id=None):
     if thread_id:
         _add(thread_id, "Thread-ID")
     _add(email_object.message_id, "Message-ID")
+    # over-long Message-IDs get trimmed to fit the field; a reply's
+    # References/In-Reply-To header still carries the real, full value
+    _add(getattr(email_object, "full_message_id", None), "Message-ID")
 
     header_values = []
     references = email_object.mail.get("References")
@@ -269,6 +272,14 @@ def create_new_email(email, gmail_account):
         # constraint; synthesize one scoped to account + gmail id (gmail_message_id
         # is already this table's own unique name, so this can't collide either)
         email_object.message_id = f"no-message-id:{gmail_account.name}:{email['id']}"
+    elif len(email_object.message_id) > 400:
+        # email_message_id is a Data(400) field — an over-long real Message-ID
+        # would otherwise throw CharacterLengthExceededError on save, which
+        # isn't caught anywhere in sync() and would abort the rest of the batch.
+        # Keep the full value too: a reply's References/In-Reply-To header
+        # carries the real, untrimmed id, not our trimmed one
+        email_object.full_message_id = email_object.message_id
+        email_object.message_id = email_object.message_id[:400]
     is_sent = False
     # check if there is a user (not website user) with the same email as the sender in frappe, if yes, then it is a sent email
     is_sent = (

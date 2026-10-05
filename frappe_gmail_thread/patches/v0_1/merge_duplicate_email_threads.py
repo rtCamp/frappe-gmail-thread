@@ -3,6 +3,7 @@ from frappe.query_builder import DocType
 from frappe.query_builder.functions import Count
 
 _TMP_INDEX = "email_message_id_dedup_tmp"
+_MAX_LEN = 400
 
 
 def execute():
@@ -10,6 +11,7 @@ def execute():
     added_index = _ensure_grouping_index()
     try:
         _backfill_blank_message_ids()
+        _backfill_overlong_message_ids()
 
         for group in _find_duplicate_message_ids():
             try:
@@ -62,6 +64,47 @@ def _backfill_blank_message_ids():
     frappe.db.commit()  # nosemgrep
 
 
+def _backfill_overlong_message_ids():
+    # the column is being narrowed to Data(400) in this same migrate run;
+    # an existing value longer than that would make the schema sync that
+    # follows this patch fail outright. Trim it to fit, but keep the full
+    # original as a reference so a reply's References/In-Reply-To header
+    # (which carries the real, untrimmed Message-ID) can still find this thread
+    rows = frappe.db.sql(
+        """
+        select name, parent, email_message_id
+        from `tabSingle Email CT`
+        where email_message_id is not null
+          and char_length(email_message_id) > %s
+        """,
+        (_MAX_LEN,),
+        as_dict=True,
+    )
+    for row in rows:
+        # trim first: _add_reference_if_missing loads+saves the whole Gmail
+        # Thread doc, which re-validates this child row too — an untrimmed
+        # value there would still hit CharacterLengthExceededError
+        frappe.db.set_value(
+            "Single Email CT",
+            row.name,
+            "email_message_id",
+            row.email_message_id[:_MAX_LEN],
+            update_modified=False,
+        )
+        _add_reference_if_missing(row.parent, row.email_message_id)
+    frappe.db.commit()  # nosemgrep
+
+
+def _add_reference_if_missing(parent, reference_id):
+    gmail_thread = frappe.get_doc("Gmail Thread", parent)
+    if any(r.reference_id == reference_id for r in gmail_thread.references):
+        return
+    gmail_thread.append(
+        "references", {"reference_id": reference_id, "reference_type": "Message-ID"}
+    )
+    gmail_thread.save(ignore_permissions=True)
+
+
 def _find_duplicate_message_ids():
     single_email_ct = DocType("Single Email CT")
     return (
@@ -106,6 +149,26 @@ def _resolve_group(message_id):
         return
 
     candidates = [_thread_info(name) for name in parents]
+
+    if "@" not in message_id:
+        # doesn't look like a real RFC Message-ID (local-part@domain) — a
+        # bogus/reused value matching across different parents isn't
+        # reliable corroboration that these are the same email (real data
+        # already hit this: "12323"-style fallback ids). Disambiguate
+        # instead of merging, so unrelated mail/participants never combine.
+        frappe.log_error(
+            title="Gmail Thread: non-RFC email_message_id matched across threads",
+            message=(
+                f"email_message_id {message_id!r} has no '@' and matches "
+                f"different threads: {parents}. Not merged — needs a human."
+            ),
+        )
+        winner = _rank(candidates)[0]
+        for row in rows:
+            if row.parent != winner.name:
+                _disambiguate(row.name, message_id)
+        return
+
     linked = [c for c in candidates if c.reference_doctype and c.reference_name]
     linked_targets = {(c.reference_doctype, c.reference_name) for c in linked}
 
@@ -211,9 +274,9 @@ def _merge_thread(loser_name, winner_name, duplicate_message_id):
 
     winner.save(ignore_permissions=True)
 
-    # drop the loser's copy of the duplicate row, reparent the rest
-    # ponytail: assumes a repeated bogus (non-RFC) id across parents is a
-    # real duplicate too — no evidence otherwise in real data today
+    # drop the loser's copy of the duplicate row, reparent the rest.
+    # _resolve_group already filtered out non-RFC-looking ids (no "@")
+    # before reaching here, so this only runs for ids that look real
     for row in frappe.get_all(
         "Single Email CT",
         filters={"parent": loser_name},
