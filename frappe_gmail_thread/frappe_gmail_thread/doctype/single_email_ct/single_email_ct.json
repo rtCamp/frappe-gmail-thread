@@ -104,7 +104,7 @@
    "fieldname": "email_message_id",
    "fieldtype": "Data",
    "unique": 1,
-   "length": 400,
+   "length": 600,
    "label": "Email Message ID",
    "read_only": 1
   },

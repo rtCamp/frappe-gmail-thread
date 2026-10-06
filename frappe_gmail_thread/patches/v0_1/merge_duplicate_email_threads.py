@@ -3,7 +3,7 @@ from frappe.query_builder import DocType
 from frappe.query_builder.functions import Count
 
 _TMP_INDEX = "email_message_id_dedup_tmp"
-_MAX_LEN = 400
+_MAX_LEN = 600
 
 
 def execute():
@@ -65,11 +65,8 @@ def _backfill_blank_message_ids():
 
 
 def _backfill_overlong_message_ids():
-    # the column is being narrowed to Data(400) in this same migrate run;
-    # an existing value longer than that would make the schema sync that
-    # follows this patch fail outright. Trim it to fit, but keep the full
-    # original as a reference so a reply's References/In-Reply-To header
-    # (which carries the real, untrimmed Message-ID) can still find this thread
+    # trim to fit the column; keep the full value as a reference so a
+    # reply's References/In-Reply-To header can still find this thread
     rows = frappe.db.sql(
         """
         select name, parent, email_message_id
@@ -81,9 +78,7 @@ def _backfill_overlong_message_ids():
         as_dict=True,
     )
     for row in rows:
-        # trim first: _add_reference_if_missing loads+saves the whole Gmail
-        # Thread doc, which re-validates this child row too — an untrimmed
-        # value there would still hit CharacterLengthExceededError
+        # trim first — the reference save below re-validates this row too
         frappe.db.set_value(
             "Single Email CT",
             row.name,
@@ -151,11 +146,8 @@ def _resolve_group(message_id):
     candidates = [_thread_info(name) for name in parents]
 
     if "@" not in message_id:
-        # doesn't look like a real RFC Message-ID (local-part@domain) — a
-        # bogus/reused value matching across different parents isn't
-        # reliable corroboration that these are the same email (real data
-        # already hit this: "12323"-style fallback ids). Disambiguate
-        # instead of merging, so unrelated mail/participants never combine.
+        # not a real-looking Message-ID (no "@") — a bogus/reused value
+        # matching across parents isn't reliable corroboration; disambiguate
         frappe.log_error(
             title="Gmail Thread: non-RFC email_message_id matched across threads",
             message=(
@@ -216,9 +208,8 @@ def _rank(candidates):
 
 
 def _disambiguate(single_email_ct_name, message_id):
-    # ponytail: one query per row; fine for the group sizes seen in practice
-    # (a handful of accounts/dirty duplicates per email_message_id) — batch
-    # this with a single CASE-based update if a group ever reaches hundreds+ rows
+    # ponytail: one query per row, fine for small groups — batch with a
+    # CASE-based update if a group ever reaches hundreds+ rows
     frappe.db.set_value(
         "Single Email CT",
         single_email_ct_name,
@@ -274,9 +265,7 @@ def _merge_thread(loser_name, winner_name, duplicate_message_id):
 
     winner.save(ignore_permissions=True)
 
-    # drop the loser's copy of the duplicate row, reparent the rest.
-    # _resolve_group already filtered out non-RFC-looking ids (no "@")
-    # before reaching here, so this only runs for ids that look real
+    # drop the loser's copy of the duplicate row, reparent the rest
     for row in frappe.get_all(
         "Single Email CT",
         filters={"parent": loser_name},

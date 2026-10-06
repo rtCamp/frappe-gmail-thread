@@ -267,19 +267,14 @@ def create_new_email(email, gmail_account):
     )
     email_object = GmailInboundMail(content=email_content, email_account=gmail_account)
     if not email_object.message_id:
-        # no RFC Message-ID header (malformed/legacy senders) — a blank value
-        # would collide with every other header-less email under the unique
-        # constraint; synthesize one scoped to account + gmail id (gmail_message_id
-        # is already this table's own unique name, so this can't collide either)
+        # missing header — a blank value would collide with every other
+        # header-less email under the unique constraint
         email_object.message_id = f"no-message-id:{gmail_account.name}:{email['id']}"
-    elif len(email_object.message_id) > 400:
-        # email_message_id is a Data(400) field — an over-long real Message-ID
-        # would otherwise throw CharacterLengthExceededError on save, which
-        # isn't caught anywhere in sync() and would abort the rest of the batch.
-        # Keep the full value too: a reply's References/In-Reply-To header
-        # carries the real, untrimmed id, not our trimmed one
+    elif len(email_object.message_id) > 600:
+        # over 600 chars would throw CharacterLengthExceededError on save;
+        # keep the full value too, a reply's References header needs it
         email_object.full_message_id = email_object.message_id
-        email_object.message_id = email_object.message_id[:400]
+        email_object.message_id = email_object.message_id[:600]
     is_sent = False
     # check if there is a user (not website user) with the same email as the sender in frappe, if yes, then it is a sent email
     is_sent = (
