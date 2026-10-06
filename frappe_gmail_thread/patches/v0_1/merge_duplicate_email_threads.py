@@ -1,9 +1,18 @@
+import json
+
 import frappe
 from frappe.query_builder import DocType
 from frappe.query_builder.functions import Count
 
+from frappe_gmail_thread.utils.helpers import shorten_message_id
+
 _TMP_INDEX = "email_message_id_dedup_tmp"
 _MAX_LEN = 600
+_ACTIVITY_DOCTYPES = (
+    ("Comment", "reference_doctype", "reference_name"),
+    ("ToDo", "reference_type", "reference_name"),
+    ("DocShare", "share_doctype", "share_name"),
+)
 
 
 def execute():
@@ -78,12 +87,11 @@ def _backfill_overlong_message_ids():
         as_dict=True,
     )
     for row in rows:
-        # trim first — the reference save below re-validates this row too
         frappe.db.set_value(
             "Single Email CT",
             row.name,
             "email_message_id",
-            row.email_message_id[:_MAX_LEN],
+            shorten_message_id(row.email_message_id, _MAX_LEN),
             update_modified=False,
         )
         _add_reference_if_missing(row.parent, row.email_message_id)
@@ -127,17 +135,21 @@ def _resolve_group(message_id):
     rows = frappe.get_all(
         "Single Email CT",
         filters={"email_message_id": message_id},
-        fields=["name", "parent"],
+        fields=["name", "parent", "attachments_data"],
+        order_by="creation asc",
     )
+    looks_real = "@" in message_id
 
-    # dedupe same-parent rows first so each parent keeps at most one row on
-    # this value, else a cross-parent merge below would delete all of them
     by_parent = {}
     for row in rows:
-        by_parent.setdefault(row.parent, []).append(row.name)
+        by_parent.setdefault(row.parent, []).append(row)
     for parent_rows in by_parent.values():
-        for name in parent_rows[1:]:
-            _disambiguate(name, message_id)
+        for row in parent_rows[1:]:
+            if looks_real:
+                _delete_duplicate_row(row)
+            else:
+                _disambiguate(row.name, message_id)
+    survivors = [parent_rows[0] for parent_rows in by_parent.values()]
 
     parents = sorted(by_parent)
     if len(parents) < 2:
@@ -145,9 +157,7 @@ def _resolve_group(message_id):
 
     candidates = [_thread_info(name) for name in parents]
 
-    if "@" not in message_id:
-        # not a real-looking Message-ID (no "@") — a bogus/reused value
-        # matching across parents isn't reliable corroboration; disambiguate
+    if not looks_real:
         frappe.log_error(
             title="Gmail Thread: non-RFC email_message_id matched across threads",
             message=(
@@ -156,7 +166,7 @@ def _resolve_group(message_id):
             ),
         )
         winner = _rank(candidates)[0]
-        for row in rows:
+        for row in survivors:
             if row.parent != winner.name:
                 _disambiguate(row.name, message_id)
         return
@@ -176,7 +186,7 @@ def _resolve_group(message_id):
             ),
         )
         winner = _rank(candidates)[0]
-        for row in rows:
+        for row in survivors:
             if row.parent != winner.name:
                 _disambiguate(row.name, message_id)
         return
@@ -217,6 +227,29 @@ def _disambiguate(single_email_ct_name, message_id):
         f"{message_id}#dup-{single_email_ct_name}",
         update_modified=False,
     )
+
+
+def _delete_duplicate_row(row):
+    if row.attachments_data:
+        for attachment in json.loads(row.attachments_data):
+            file_doc_name = attachment.get("file_doc_name")
+            if file_doc_name and frappe.db.exists("File", file_doc_name):
+                frappe.delete_doc(
+                    "File", file_doc_name, ignore_permissions=True, force=True
+                )
+    frappe.delete_doc("Single Email CT", row.name, ignore_permissions=True, force=True)
+
+
+def _reparent_activity(loser_name, winner_name):
+    for doctype, doctype_field, name_field in _ACTIVITY_DOCTYPES:
+        for name in frappe.get_all(
+            doctype,
+            filters={doctype_field: "Gmail Thread", name_field: loser_name},
+            pluck="name",
+        ):
+            frappe.db.set_value(
+                doctype, name, name_field, winner_name, update_modified=False
+            )
 
 
 def _merge_thread(loser_name, winner_name, duplicate_message_id):
@@ -269,12 +302,10 @@ def _merge_thread(loser_name, winner_name, duplicate_message_id):
     for row in frappe.get_all(
         "Single Email CT",
         filters={"parent": loser_name},
-        fields=["name", "email_message_id"],
+        fields=["name", "email_message_id", "attachments_data"],
     ):
         if row.email_message_id == duplicate_message_id:
-            frappe.delete_doc(
-                "Single Email CT", row.name, ignore_permissions=True, force=True
-            )
+            _delete_duplicate_row(row)
         else:
             frappe.db.set_value(
                 "Single Email CT",
@@ -291,6 +322,7 @@ def _merge_thread(loser_name, winner_name, duplicate_message_id):
     ):
         frappe.db.set_value("File", file_name, "attached_to_name", winner_name)
 
+    _reparent_activity(loser_name, winner_name)
     frappe.delete_doc("Gmail Thread", loser_name, ignore_permissions=True, force=True)
 
     # moved rows just got appended — re-sort by date so the merged

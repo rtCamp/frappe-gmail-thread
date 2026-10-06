@@ -1,6 +1,8 @@
 import base64
+import hashlib
 import json
 import re
+from collections import Counter
 from uuid import uuid4
 
 import frappe
@@ -100,6 +102,13 @@ def html_to_text(html):
     return soup.get_text(separator=" ", strip=True)
 
 
+def shorten_message_id(value, max_len=600):
+    if len(value) <= max_len:
+        return value
+    digest = hashlib.sha256(value.encode()).hexdigest()[:16]
+    return f"{value[: max_len - 17]}~{digest}"
+
+
 def _thread_by_references(candidate_ids):
     if not candidate_ids:
         return None
@@ -148,28 +157,18 @@ def find_gmail_thread(thread_id, message_ids: list = None):
 
 
 def _dominant_thread(ref_parents):
-    # multiple matches: most references wins, oldest breaks ties
-    unique_parents = set(ref_parents)
-    if len(unique_parents) == 1:
-        return next(iter(unique_parents))
-
-    counts = frappe.get_all(
-        "Gmail Thread Reference",
-        filters={
-            "parent": ["in", list(unique_parents)],
-            "parenttype": "Gmail Thread",
-            "parentfield": "references",
-        },
-        fields=[
-            "parent",
-            {"COUNT": "name", "as": "reference_count"},
-            {"MIN": "creation", "as": "oldest_reference"},
-        ],
-        group_by="parent",
-        order_by="reference_count desc, oldest_reference asc",
-        limit=1,
+    matches = Counter(ref_parents)
+    if len(matches) == 1:
+        return next(iter(matches))
+    created = dict(
+        frappe.get_all(
+            "Gmail Thread",
+            filters={"name": ["in", list(matches)]},
+            fields=["name", "creation"],
+            as_list=True,
+        )
     )
-    return counts[0].parent
+    return min(matches, key=lambda p: (-matches[p], created[p]))
 
 
 def collect_reference_ids(email_object, thread_id=None):
@@ -233,15 +232,7 @@ class AlreadyExistsError(Exception):
     pass
 
 
-def merge_duplicate_email(email_object, gmail_account):
-    # for_update: a plain read here can miss the winner's commit (this
-    # transaction's snapshot predates it). Let QueryDeadlockError escape
-    # rather than retrying here: frappe.db.rollback() with no savepoint
-    # wipes the WHOLE transaction, including any earlier messages in this
-    # same sync batch that haven't committed yet — retrying in place would
-    # silently drop them while the batch keeps going. Letting it propagate
-    # aborts this sync() call untouched; last_historyid is never advanced,
-    # so the next poll safely retries the whole batch.
+def merge_duplicate_email(email_object, gmail_account, thread_id=None):
     parent = frappe.db.get_value(
         "Single Email CT",
         {"email_message_id": email_object.message_id},
@@ -249,14 +240,23 @@ def merge_duplicate_email(email_object, gmail_account):
         for_update=True,
     )
     gmail_thread = frappe.get_doc("Gmail Thread", parent, for_update=True)
-    involved_users_linked = [user.account for user in gmail_thread.involved_users]
+    changed = False
+    involved_users_linked = {user.account for user in gmail_thread.involved_users}
     if gmail_account.linked_user not in involved_users_linked:
         gmail_thread.append(
             "involved_users",
             frappe.get_doc(doctype="Involved User", account=gmail_account.linked_user),
         )
+        changed = True
+    existing_reference_ids = {r.reference_id for r in gmail_thread.references}
+    if thread_id and thread_id not in existing_reference_ids:
+        gmail_thread.append(
+            "references", {"reference_id": thread_id, "reference_type": "Thread-ID"}
+        )
+        changed = True
+    if changed:
         gmail_thread.save(ignore_permissions=True)
-        frappe.db.commit()  # nosemgrep
+    frappe.db.commit()  # nosemgrep
     return gmail_thread
 
 
@@ -267,14 +267,10 @@ def create_new_email(email, gmail_account):
     )
     email_object = GmailInboundMail(content=email_content, email_account=gmail_account)
     if not email_object.message_id:
-        # missing header — a blank value would collide with every other
-        # header-less email under the unique constraint
         email_object.message_id = f"no-message-id:{gmail_account.name}:{email['id']}"
     elif len(email_object.message_id) > 600:
-        # over 600 chars would throw CharacterLengthExceededError on save;
-        # keep the full value too, a reply's References header needs it
         email_object.full_message_id = email_object.message_id
-        email_object.message_id = email_object.message_id[:600]
+        email_object.message_id = shorten_message_id(email_object.message_id)
     is_sent = False
     # check if there is a user (not website user) with the same email as the sender in frappe, if yes, then it is a sent email
     is_sent = (

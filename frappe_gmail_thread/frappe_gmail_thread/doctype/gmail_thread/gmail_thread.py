@@ -300,8 +300,6 @@ def sync(user=None):
                             involved_users.add(recipient)
                         involved_users.add(gmail_account.linked_user)
                         update_involved_users(gmail_thread, involved_users)
-                        # savepoint wraps attachments too, so a lost race rolls
-                        # those back with the email instead of orphaning them
                         frappe.db.savepoint("gmail_thread_email_insert")
                         process_attachments(email, gmail_thread, email_object)
                         replace_inline_images(email, email_object)
@@ -319,14 +317,9 @@ def sync(user=None):
                         try:
                             gmail_thread.save(ignore_permissions=True)
                         except frappe.UniqueValidationError:
-                            # another account's sync won the race for this message.
-                            # gmail_thread persists across messages in this same
-                            # Gmail thread_id below — reassign it to the actual
-                            # winner, not the never-persisted doc that just failed,
-                            # so the next message here reloads/appends correctly
                             frappe.db.rollback(save_point="gmail_thread_email_insert")
                             gmail_thread = merge_duplicate_email(
-                                email_object, gmail_account
+                                email_object, gmail_account, thread_id=thread_id
                             )
                             continue
                         frappe.db.commit()  # nosemgrep
@@ -450,8 +443,6 @@ def sync(user=None):
                                 involved_users.add(recipient)
                             involved_users.add(gmail_account.linked_user)
                             update_involved_users(gmail_thread, involved_users)
-                            # savepoint wraps attachments too, so a lost race rolls
-                            # those back with the email instead of orphaning them
                             frappe.db.savepoint("gmail_thread_email_insert")
                             process_attachments(email, gmail_thread, email_object)
                             replace_inline_images(email, email_object)
@@ -469,12 +460,11 @@ def sync(user=None):
                             try:
                                 gmail_thread.save(ignore_permissions=True)
                             except frappe.UniqueValidationError:
-                                # another account's sync won the race for this message
                                 frappe.db.rollback(
                                     save_point="gmail_thread_email_insert"
                                 )
                                 gmail_thread = merge_duplicate_email(
-                                    email_object, gmail_account
+                                    email_object, gmail_account, thread_id=thread_id
                                 )
                                 continue
                             frappe.db.set_value(
@@ -513,6 +503,8 @@ def sync(user=None):
                             doctype=doctype,
                             docname=docname,
                         )
+        except frappe.QueryDeadlockError:
+            raise
         except Exception:
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")
             continue
