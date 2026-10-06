@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import os
 import re
 from collections import Counter
 from uuid import uuid4
@@ -362,6 +363,7 @@ def replace_inline_images(new_email, email_object):
 
 def process_attachments(new_email, gmail_thread, email_object):
     attachments = []
+    written = []
     for attachment in email_object.attachments:
         try:
             attachment["mapped_name"] = attachment["fname"]
@@ -388,6 +390,13 @@ def process_attachments(new_email, gmail_thread, email_object):
                     "is_private": _file.is_private,
                 }
             )
+            written.append(
+                {
+                    "content_hash": _file.content_hash,
+                    "is_private": _file.is_private,
+                    "path": _file.get_full_path(),
+                }
+            )
 
             if attachment["fname"] in email_object.cid_map:
                 email_object.cid_map[_file.name] = email_object.cid_map[
@@ -408,3 +417,15 @@ def process_attachments(new_email, gmail_thread, email_object):
                 message=f"{attachment.get('fname')}\n\n{frappe.get_traceback()}",
             )
     new_email.attachments_data = json.dumps(attachments)
+    return written
+
+
+def cleanup_orphaned_attachments(written):
+    for item in written:
+        if frappe.db.exists(
+            "File",
+            {"content_hash": item["content_hash"], "is_private": item["is_private"]},
+        ):
+            continue
+        if os.path.exists(item["path"]):
+            os.remove(item["path"])

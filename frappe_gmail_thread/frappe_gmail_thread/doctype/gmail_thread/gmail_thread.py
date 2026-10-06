@@ -16,6 +16,7 @@ from frappe_gmail_thread.api.oauth import get_gmail_object
 from frappe_gmail_thread.utils.helpers import (
     AlreadyExistsError,
     add_thread_references,
+    cleanup_orphaned_attachments,
     create_new_email,
     find_gmail_thread,
     merge_duplicate_email,
@@ -301,7 +302,9 @@ def sync(user=None):
                         involved_users.add(gmail_account.linked_user)
                         update_involved_users(gmail_thread, involved_users)
                         frappe.db.savepoint("gmail_thread_email_insert")
-                        process_attachments(email, gmail_thread, email_object)
+                        written_attachments = process_attachments(
+                            email, gmail_thread, email_object
+                        )
                         replace_inline_images(email, email_object)
                         add_thread_references(
                             gmail_thread,
@@ -318,6 +321,7 @@ def sync(user=None):
                             gmail_thread.save(ignore_permissions=True)
                         except frappe.UniqueValidationError:
                             frappe.db.rollback(save_point="gmail_thread_email_insert")
+                            cleanup_orphaned_attachments(written_attachments)
                             gmail_thread = merge_duplicate_email(
                                 email_object, gmail_account, thread_id=thread_id
                             )
@@ -444,7 +448,9 @@ def sync(user=None):
                             involved_users.add(gmail_account.linked_user)
                             update_involved_users(gmail_thread, involved_users)
                             frappe.db.savepoint("gmail_thread_email_insert")
-                            process_attachments(email, gmail_thread, email_object)
+                            written_attachments = process_attachments(
+                                email, gmail_thread, email_object
+                            )
                             replace_inline_images(email, email_object)
                             add_thread_references(
                                 gmail_thread,
@@ -463,6 +469,7 @@ def sync(user=None):
                                 frappe.db.rollback(
                                     save_point="gmail_thread_email_insert"
                                 )
+                                cleanup_orphaned_attachments(written_attachments)
                                 gmail_thread = merge_duplicate_email(
                                     email_object, gmail_account, thread_id=thread_id
                                 )
