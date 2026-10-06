@@ -1,7 +1,7 @@
 [pre_model_sync]
 # Patches added in this section will be executed before doctypes are migrated
 # Read docs to understand patches: https://frappeframework.com/docs/v14/user/en/database-migrations
-
+frappe_gmail_thread.patches.v0_1.merge_duplicate_email_threads
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
 frappe_gmail_thread.patches.v0_1.remove_chat_label

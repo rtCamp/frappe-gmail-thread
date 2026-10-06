@@ -16,8 +16,10 @@ from frappe_gmail_thread.api.oauth import get_gmail_object
 from frappe_gmail_thread.utils.helpers import (
     AlreadyExistsError,
     add_thread_references,
+    cleanup_orphaned_attachments,
     create_new_email,
     find_gmail_thread,
+    merge_duplicate_email,
     process_attachments,
     replace_inline_images,
 )
@@ -299,7 +301,10 @@ def sync(user=None):
                             involved_users.add(recipient)
                         involved_users.add(gmail_account.linked_user)
                         update_involved_users(gmail_thread, involved_users)
-                        process_attachments(email, gmail_thread, email_object)
+                        frappe.db.savepoint("gmail_thread_email_insert")
+                        written_attachments = process_attachments(
+                            email, gmail_thread, email_object
+                        )
                         replace_inline_images(email, email_object)
                         add_thread_references(
                             gmail_thread,
@@ -312,7 +317,15 @@ def sync(user=None):
                         )
                         gmail_thread.append("emails", email, position=pos)
                         latest_dt = gmail_thread.emails[-1].date_and_time
-                        gmail_thread.save(ignore_permissions=True)
+                        try:
+                            gmail_thread.save(ignore_permissions=True)
+                        except frappe.UniqueValidationError:
+                            frappe.db.rollback(save_point="gmail_thread_email_insert")
+                            cleanup_orphaned_attachments(written_attachments)
+                            gmail_thread = merge_duplicate_email(
+                                email_object, gmail_account, thread_id=thread_id
+                            )
+                            continue
                         frappe.db.commit()  # nosemgrep
                         frappe.db.set_value(
                             "Gmail Thread",
@@ -434,7 +447,10 @@ def sync(user=None):
                                 involved_users.add(recipient)
                             involved_users.add(gmail_account.linked_user)
                             update_involved_users(gmail_thread, involved_users)
-                            process_attachments(email, gmail_thread, email_object)
+                            frappe.db.savepoint("gmail_thread_email_insert")
+                            written_attachments = process_attachments(
+                                email, gmail_thread, email_object
+                            )
                             replace_inline_images(email, email_object)
                             add_thread_references(
                                 gmail_thread,
@@ -447,7 +463,17 @@ def sync(user=None):
                             )
                             gmail_thread.append("emails", email, position=pos)
                             latest_dt = gmail_thread.emails[-1].date_and_time
-                            gmail_thread.save(ignore_permissions=True)
+                            try:
+                                gmail_thread.save(ignore_permissions=True)
+                            except frappe.UniqueValidationError:
+                                frappe.db.rollback(
+                                    save_point="gmail_thread_email_insert"
+                                )
+                                cleanup_orphaned_attachments(written_attachments)
+                                gmail_thread = merge_duplicate_email(
+                                    email_object, gmail_account, thread_id=thread_id
+                                )
+                                continue
                             frappe.db.set_value(
                                 "Gmail Thread",
                                 gmail_thread.name,
@@ -484,6 +510,8 @@ def sync(user=None):
                             doctype=doctype,
                             docname=docname,
                         )
+        except frappe.QueryDeadlockError:
+            raise
         except Exception:
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")
             continue

@@ -1,6 +1,9 @@
 import base64
+import hashlib
 import json
+import os
 import re
+from collections import Counter
 from uuid import uuid4
 
 import frappe
@@ -100,33 +103,47 @@ def html_to_text(html):
     return soup.get_text(separator=" ", strip=True)
 
 
+def shorten_message_id(value, max_len=600):
+    if len(value) <= max_len:
+        return value
+    digest = hashlib.sha256(value.encode()).hexdigest()[:16]
+    return f"{value[: max_len - 17]}~{digest}"
+
+
+def _thread_by_references(candidate_ids):
+    if not candidate_ids:
+        return None
+    ref_parents = frappe.get_all(
+        "Gmail Thread Reference",
+        filters={
+            "reference_id": ["in", candidate_ids],
+            "parenttype": "Gmail Thread",
+            "parentfield": "references",
+        },
+        pluck="parent",
+    )
+    if not ref_parents:
+        return None
+    return frappe.get_doc("Gmail Thread", _dominant_thread(ref_parents))
+
+
 def find_gmail_thread(thread_id, message_ids: list = None):
+    # Message-ID references beat thread_id: thread_id is per-mailbox and a
+    # weaker signal, so it's only consulted once a real Message-ID match
+    # fails — two explicit phases, not a pooled query, so a thread_id can
+    # never outrank an actual Message-ID match against an unrelated thread
+    message_thread = _thread_by_references([x for x in (message_ids or []) if x])
+    if message_thread:
+        return message_thread
+
+    thread_id_thread = _thread_by_references([thread_id] if thread_id else [])
+    if thread_id_thread:
+        return thread_id_thread
+
     try:
-        gmail_thread = frappe.get_doc("Gmail Thread", {"gmail_thread_id": thread_id})
+        return frappe.get_doc("Gmail Thread", {"gmail_thread_id": thread_id})
     except frappe.DoesNotExistError:
-        gmail_thread = None
-
-        candidate_ids = [thread_id] + (message_ids or [])
-        candidate_ids = [x for x in candidate_ids if x]
-        if candidate_ids:
-            try:
-                ref_parents = frappe.get_all(
-                    "Gmail Thread Reference",
-                    filters={
-                        "reference_id": ["in", candidate_ids],
-                        "parenttype": "Gmail Thread",
-                        "parentfield": "references",
-                    },
-                    pluck="parent",
-                    limit=1,
-                )
-                if ref_parents:
-                    return frappe.get_doc("Gmail Thread", ref_parents[0])
-
-            except frappe.DoesNotExistError:
-                pass
-
-        # for old threads, check if any of the message_ids are already in Single Email CT
+        # legacy fallback: match by message_id in Single Email CT
         if message_ids:
             for message_id in message_ids:
                 try:
@@ -134,13 +151,25 @@ def find_gmail_thread(thread_id, message_ids: list = None):
                         "Single Email CT", {"email_message_id": message_id}
                     )
                     if single_email_ct:
-                        gmail_thread = frappe.get_doc(
-                            "Gmail Thread", single_email_ct.parent
-                        )
-                        break
+                        return frappe.get_doc("Gmail Thread", single_email_ct.parent)
                 except frappe.DoesNotExistError:
                     pass
-    return gmail_thread
+    return None
+
+
+def _dominant_thread(ref_parents):
+    matches = Counter(ref_parents)
+    if len(matches) == 1:
+        return next(iter(matches))
+    created = dict(
+        frappe.get_all(
+            "Gmail Thread",
+            filters={"name": ["in", list(matches)]},
+            fields=["name", "creation"],
+            as_list=True,
+        )
+    )
+    return min(matches, key=lambda p: (-matches[p], created[p]))
 
 
 def collect_reference_ids(email_object, thread_id=None):
@@ -163,6 +192,9 @@ def collect_reference_ids(email_object, thread_id=None):
     if thread_id:
         _add(thread_id, "Thread-ID")
     _add(email_object.message_id, "Message-ID")
+    # over-long Message-IDs get trimmed to fit the field; a reply's
+    # References/In-Reply-To header still carries the real, full value
+    _add(getattr(email_object, "full_message_id", None), "Message-ID")
 
     header_values = []
     references = email_object.mail.get("References")
@@ -201,12 +233,45 @@ class AlreadyExistsError(Exception):
     pass
 
 
+def merge_duplicate_email(email_object, gmail_account, thread_id=None):
+    parent = frappe.db.get_value(
+        "Single Email CT",
+        {"email_message_id": email_object.message_id},
+        "parent",
+        for_update=True,
+    )
+    gmail_thread = frappe.get_doc("Gmail Thread", parent, for_update=True)
+    changed = False
+    involved_users_linked = {user.account for user in gmail_thread.involved_users}
+    if gmail_account.linked_user not in involved_users_linked:
+        gmail_thread.append(
+            "involved_users",
+            frappe.get_doc(doctype="Involved User", account=gmail_account.linked_user),
+        )
+        changed = True
+    existing_reference_ids = {r.reference_id for r in gmail_thread.references}
+    if thread_id and thread_id not in existing_reference_ids:
+        gmail_thread.append(
+            "references", {"reference_id": thread_id, "reference_type": "Thread-ID"}
+        )
+        changed = True
+    if changed:
+        gmail_thread.save(ignore_permissions=True)
+    frappe.db.commit()  # nosemgrep
+    return gmail_thread
+
+
 def create_new_email(email, gmail_account):
     # decode raw email with errors='replace' to avoid UnicodeDecodeError
     email_content = base64.urlsafe_b64decode(email["raw"].encode("ASCII")).decode(
         "utf-8", errors="replace"
     )
     email_object = GmailInboundMail(content=email_content, email_account=gmail_account)
+    if not email_object.message_id:
+        email_object.message_id = f"no-message-id:{gmail_account.name}:{email['id']}"
+    elif len(email_object.message_id) > 600:
+        email_object.full_message_id = email_object.message_id
+        email_object.message_id = shorten_message_id(email_object.message_id)
     is_sent = False
     # check if there is a user (not website user) with the same email as the sender in frappe, if yes, then it is a sent email
     is_sent = (
@@ -298,6 +363,7 @@ def replace_inline_images(new_email, email_object):
 
 def process_attachments(new_email, gmail_thread, email_object):
     attachments = []
+    written = []
     for attachment in email_object.attachments:
         try:
             attachment["mapped_name"] = attachment["fname"]
@@ -324,6 +390,13 @@ def process_attachments(new_email, gmail_thread, email_object):
                     "is_private": _file.is_private,
                 }
             )
+            written.append(
+                {
+                    "content_hash": _file.content_hash,
+                    "is_private": _file.is_private,
+                    "path": _file.get_full_path(),
+                }
+            )
 
             if attachment["fname"] in email_object.cid_map:
                 email_object.cid_map[_file.name] = email_object.cid_map[
@@ -344,3 +417,15 @@ def process_attachments(new_email, gmail_thread, email_object):
                 message=f"{attachment.get('fname')}\n\n{frappe.get_traceback()}",
             )
     new_email.attachments_data = json.dumps(attachments)
+    return written
+
+
+def cleanup_orphaned_attachments(written):
+    for item in written:
+        if frappe.db.exists(
+            "File",
+            {"content_hash": item["content_hash"], "is_private": item["is_private"]},
+        ):
+            continue
+        if os.path.exists(item["path"]):
+            os.remove(item["path"])
