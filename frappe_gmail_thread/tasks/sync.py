@@ -2,6 +2,7 @@ import frappe
 from frappe.utils.background_jobs import is_job_enqueued
 
 from frappe_gmail_thread.utils.queues import get_gmail_thread_sync_queue_name
+from frappe_gmail_thread.utils.sync_pause import is_sync_paused
 
 
 def sync_emails():
@@ -13,6 +14,8 @@ def sync_emails():
     for gmail_account in gmail_accounts:
         if gmail_account.refresh_token:
             if not frappe.get_value("User", gmail_account.linked_user, "enabled"):
+                continue
+            if is_sync_paused(gmail_account.linked_user):
                 continue
             job_name = f"gmail_thread_sync_{gmail_account.linked_user}"
             if not is_job_enqueued(job_name):
