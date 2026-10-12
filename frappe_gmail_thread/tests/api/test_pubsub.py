@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, change_settings
+from frappe.tests.test_api import FrappeAPITestCase
 
 from frappe_gmail_thread.api.pubsub import callback
 from frappe_gmail_thread.tests import (
@@ -196,3 +197,20 @@ class TestPubsubCallback(IntegrationTestCase):
             set_password_field("Gmail Account", self.account, "refresh_token", "rt")
         self.assertEqual(result, "OK")
         mock_enqueue.assert_not_called()
+
+
+class TestPubsubCallbackRoute(FrappeAPITestCase):
+    """Calls the endpoint through Frappe's request handling, where the HTTP method is enforced."""
+
+    def test_accepts_post_from_guest(self):
+        """Pub/Sub push requests (POST, no session) reach the callback."""
+        response = self.post(
+            self.method("frappe_gmail_thread.api.pubsub.callback"), {"message": {}}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["message"], "OK")
+
+    def test_rejects_get(self):
+        """A GET request is refused before the callback runs."""
+        response = self.get(self.method("frappe_gmail_thread.api.pubsub.callback"))
+        self.assertEqual(response.status_code, 403)
