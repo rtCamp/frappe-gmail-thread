@@ -308,6 +308,49 @@ class TestProcessAttachments(IntegrationTestCase):
         self.assertLess(len(saved_name), 140)
 
 
+class TestProcessAttachmentsAsMailboxUser(IntegrationTestCase):
+    """The sync runs as the mailbox's user, not as Administrator."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        make_test_user(TEST_USER)
+        frappe.db.set_value("User", TEST_USER, "user_type", "System User")
+        frappe.clear_cache(user=TEST_USER)
+        with as_user(TEST_USER):
+            cls.account = make_test_gmail_account(linked_user=TEST_USER)
+
+    def _attach(self, thread):
+        new_email = frappe.new_doc("Single Email CT")
+        email_object = MagicMock()
+        email_object.attachments = [{"fname": "quote.txt", "fcontent": b"quote"}]
+        email_object.cid_map = {}
+        with as_user(TEST_USER):
+            process_attachments(new_email, thread, email_object)
+        return json.loads(new_email.attachments_data)
+
+    def test_saves_attachments_of_a_thread_not_created_yet(self):
+        """The first email of a new thread keeps its attachments, though the thread isn't saved yet."""
+        thread = frappe.new_doc("Gmail Thread")
+        thread.gmail_thread_id = "attach-new-thread"
+        thread.gmail_account = self.account.name
+        data = self._attach(thread)
+        self.assertEqual([row["file_name"] for row in data], ["quote.txt"])
+        self.assertEqual(
+            frappe.db.get_value("File", data[0]["file_doc_name"], "attached_to_name"),
+            "attach-new-thread",
+        )
+
+    def test_saves_attachments_on_a_thread_the_user_is_not_part_of_yet(self):
+        """An email that brings this mailbox into an existing thread keeps its attachments."""
+        thread = make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id="attach-other-mailbox-thread",
+        )
+        data = self._attach(thread)
+        self.assertEqual([row["file_name"] for row in data], ["quote.txt"])
+
+
 class TestReplaceInlineImages(IntegrationTestCase):
     @classmethod
     def setUpClass(cls):

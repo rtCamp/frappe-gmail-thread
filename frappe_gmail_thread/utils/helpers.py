@@ -316,7 +316,9 @@ def process_attachments(new_email, gmail_thread, email_object):
                     "content": attachment["fcontent"],
                 }
             )
-            _file.save()
+            # imported by the mailbox's own sync: the thread may not be saved
+            # yet, or not list this user yet, which the attach check rejects
+            _file.save(ignore_permissions=True)
             attachments.append(
                 {
                     "file_name": _file.file_name,
