@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import frappe
@@ -81,6 +82,106 @@ class TestGetLinkedGmailThreads(IntegrationTestCase):
             self.assertEqual(entry["doctype"], "Gmail Thread")
             self.assertEqual(entry["icon"], "mail")
             self.assertEqual(entry["template"], "timeline_message_box")
+
+    def _make_file(self, name):
+        return frappe.get_doc(
+            {
+                "doctype": "File",
+                "file_name": name,
+                "content": name.encode(),
+                "is_private": 1,
+            }
+        ).insert(ignore_permissions=True)
+
+    def _make_linked_thread(self, thread_id, reference_name, n_emails=2):
+        emails = []
+        for i in range(n_emails):
+            file_doc = self._make_file(f"{thread_id}-{i}.txt")
+            emails.append(
+                {
+                    "gmail_message_id": f"{thread_id}-mid-{i}",
+                    "email_message_id": f"<{thread_id}-{i}@x.com>",
+                    "subject": f"{thread_id} {i}",
+                    "sender": TEST_USER,
+                    "attachments_data": json.dumps(
+                        [{"file_doc_name": file_doc.name, "file_name": "a.txt"}]
+                    ),
+                }
+            )
+        return make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id=thread_id,
+            reference_doctype="User",
+            reference_name=reference_name,
+            emails=emails,
+        )
+
+    @contextmanager
+    def _count_queries(self):
+        queries = []
+        orig_sql = frappe.db.__class__.sql
+
+        def counting_sql(*args, **kwargs):
+            queries.append(1)
+            return orig_sql(*args, **kwargs)
+
+        frappe.db.__class__.sql = counting_sql
+        try:
+            yield queries
+        finally:
+            frappe.db.__class__.sql = orig_sql
+
+    def test_resolves_attachments_to_current_file_urls(self):
+        """Attachments resolve to their File's current URL; entries whose File is gone, or that have no URL, are dropped."""
+        target = "test_fgt_timeline_attachments@example.com"
+        make_test_user(target)
+        live = self._make_file("timeline-live.txt")
+        make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id="timeline-attachments",
+            reference_doctype="User",
+            reference_name=target,
+            emails=[
+                {
+                    "gmail_message_id": "tl-att-1",
+                    "email_message_id": "<tl-att-1@x.com>",
+                    "subject": "With attachments",
+                    "sender": TEST_USER,
+                    "attachments_data": json.dumps(
+                        [
+                            {"file_doc_name": live.name, "file_url": "/old/stale.txt"},
+                            {"file_doc_name": "no-such-file"},
+                            {"file_url": "/files/external.png"},
+                            {"file_name": "no-url.txt"},
+                            "not-a-dict",
+                        ]
+                    ),
+                }
+            ],
+        )
+        result = get_linked_gmail_threads("User", target)
+        urls = [a["file_url"] for a in result[0]["template_data"]["doc"]["attachments"]]
+        self.assertEqual(urls, [live.file_url, "/files/external.png"])
+
+    def test_query_count_does_not_grow_with_threads_and_emails(self):
+        """The timeline costs the same number of queries for one linked thread as for several threads with more emails and attachments."""
+        target = "test_fgt_timeline_queries@example.com"
+        make_test_user(target)
+        self._make_linked_thread("timeline-q-1", target, n_emails=1)
+        get_linked_gmail_threads("User", target)  # warm caches
+        with self._count_queries() as queries:
+            single = get_linked_gmail_threads("User", target)
+        self.assertEqual(len(single), 1)
+
+        for i in range(2, 5):
+            self._make_linked_thread(f"timeline-q-{i}", target, n_emails=3)
+        get_linked_gmail_threads("User", target)
+        with self.assertQueryCount(len(queries)):
+            many = get_linked_gmail_threads("User", target)
+        self.assertEqual(len(many), 10)
+        self.assertEqual(
+            sum(len(e["template_data"]["doc"]["attachments"]) for e in many), 10
+        )
 
     def test_returns_empty_list_when_no_thread_references_the_doc(self):
         """get_linked_gmail_threads returns [] when no Gmail Thread points at the supplied (doctype, docname)."""
