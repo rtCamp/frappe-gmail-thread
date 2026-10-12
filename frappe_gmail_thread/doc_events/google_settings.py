@@ -1,5 +1,7 @@
 import frappe
 from frappe.model.document import Document
+from frappe.utils import cint
+from frappe.utils.file_lock import LockTimeoutError
 from frappe.utils.synchronization import filelock
 
 from frappe_gmail_thread.api.oauth import disable_pubsub, enable_pubsub
@@ -21,15 +23,26 @@ def on_update(doc: Document, method: str | None = None) -> None:
 
 def update_gmail_watches() -> None:
     """Start or stop the Gmail watch of every authorized mailbox to match the real-time sync setting."""
-    # Several long workers can pick up these jobs at once. Running them one at a time, each reading
-    # the setting only once it holds the lock, makes the last run apply the last saved value.
-    with filelock("gmail_thread_update_watches", timeout=WATCH_UPDATE_LOCK_TIMEOUT):
-        # new transaction: a snapshot taken before the wait would miss a save made meanwhile
-        frappe.db.rollback()
-        realtime = frappe.db.get_single_value(
-            "Google Settings", "custom_gmail_sync_in_realtime", cache=False
-        )
-        apply_realtime_setting_to_watches(realtime)
+    # Several long workers can pick up these jobs at once. One runs at a time, and it repeats
+    # until the value it applied is still the saved one, so the last saved value is applied last.
+    try:
+        with filelock("gmail_thread_update_watches", timeout=WATCH_UPDATE_LOCK_TIMEOUT):
+            applied = None
+            while True:
+                # new transaction: its snapshot sees saves made while waiting or applying
+                frappe.db.commit()  # nosemgrep
+                realtime = cint(
+                    frappe.db.get_single_value(
+                        "Google Settings", "custom_gmail_sync_in_realtime", cache=False
+                    )
+                )
+                if realtime == applied:
+                    return
+                apply_realtime_setting_to_watches(realtime)
+                applied = realtime
+    except LockTimeoutError:
+        # the run holding the lock re-reads the setting before it ends and applies this change
+        return
 
 
 def apply_realtime_setting_to_watches(realtime: bool | int) -> None:

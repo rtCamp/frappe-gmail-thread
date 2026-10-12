@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, change_settings
+from frappe.utils.file_lock import LockTimeoutError
 
 from frappe_gmail_thread.doc_events.google_settings import (
     apply_realtime_setting_to_watches,
@@ -125,12 +126,37 @@ class TestOnUpdate(IntegrationTestCase):
         self.assertIn(self.second, started)
         mock_log.assert_called()
 
-    def test_reads_setting_once_it_holds_the_lock(self):
-        """A run waiting for the lock applies the value saved while it waited, in a fresh transaction."""
+    def _update_watches(self, *, lock, apply):
+        """Run update_gmail_watches with `lock` as the file lock; returns what happened, in order."""
         events = []
 
+        def record_apply(realtime):
+            events.append(f"apply {realtime}")
+            apply(realtime)
+
+        with (
+            change_settings("Google Settings", custom_gmail_sync_in_realtime=1),
+            patch(
+                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.filelock",
+                side_effect=lambda name, timeout: lock(events),
+            ),
+            # a real commit would keep this test's records
+            patch.object(
+                frappe.db, "commit", side_effect=lambda: events.append("commit")
+            ),
+            patch(
+                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.apply_realtime_setting_to_watches",
+                side_effect=record_apply,
+            ),
+        ):
+            update_gmail_watches()
+        return events
+
+    def test_reads_setting_once_it_holds_the_lock(self):
+        """A run waiting for the lock applies the value saved while it waited, in a new transaction."""
+
         @contextmanager
-        def lock(name, timeout):
+        def lock(events):
             events.append("locked")
             # another worker's run finishes and the setting is saved again meanwhile
             frappe.db.set_single_value(
@@ -139,17 +165,31 @@ class TestOnUpdate(IntegrationTestCase):
             yield
             events.append("unlocked")
 
-        with (
-            change_settings("Google Settings", custom_gmail_sync_in_realtime=1),
-            patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.filelock", side_effect=lock),
-            # a real rollback would also drop this test's records
-            patch.object(
-                frappe.db, "rollback", side_effect=lambda: events.append("rollback")
-            ),
-            patch(
-                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.apply_realtime_setting_to_watches",
-                side_effect=lambda realtime: events.append(f"apply {realtime}"),
-            ),
-        ):
-            update_gmail_watches()
-        self.assertEqual(events, ["locked", "rollback", "apply 0", "unlocked"])
+        events = self._update_watches(lock=lock, apply=lambda realtime: None)
+        self.assertEqual(events, ["locked", "commit", "apply 0", "commit", "unlocked"])
+
+    def test_repeats_until_the_saved_setting_is_applied(self):
+        """A save made while the watches are updated is applied by the same run before it ends."""
+
+        @contextmanager
+        def lock(events):
+            yield
+
+        def apply(realtime):
+            if realtime:
+                # saved again while this run goes through the mailboxes
+                frappe.db.set_single_value(
+                    "Google Settings", "custom_gmail_sync_in_realtime", 0
+                )
+
+        events = self._update_watches(lock=lock, apply=apply)
+        self.assertEqual(events, ["commit", "apply 1", "commit", "apply 0", "commit"])
+
+    def test_run_that_cannot_get_the_lock_ends_quietly(self):
+        """A run whose lock wait times out leaves the change to the run holding the lock, without failing."""
+
+        def lock(events):
+            raise LockTimeoutError("locked by another run")
+
+        events = self._update_watches(lock=lock, apply=lambda realtime: None)
+        self.assertEqual(events, [])
