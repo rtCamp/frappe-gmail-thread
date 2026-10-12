@@ -609,6 +609,70 @@ class TestSyncRateLimits(_GmailThreadTestCase):
         self.assertEqual(gmail.users().history().list.call_count, 2)
         self.assertFalse(is_sync_paused(TEST_USER))
 
+    def _sync_message_error(self, error):
+        """Incrementally sync one message whose fetch raises `error`; returns (account, log mock)."""
+        account = _reset_account_for_sync(last_historyid=100)
+        gmail = self._incremental_gmail(
+            {
+                "INBOX": {
+                    "history": [{"messages": [{"id": "m-err", "threadId": "t-err"}]}],
+                    "historyId": "500",
+                }
+            }
+        )
+        gmail.users().messages().get.return_value.execute.side_effect = error
+        with patch(f"{GMAIL_THREAD_MODULE}.create_new_email") as mock_create:
+            mock_log = self._sync(gmail)
+        mock_create.assert_not_called()
+        return account, mock_log
+
+    def _last_historyid(self, account):
+        return frappe.db.get_value("Gmail Account", account.name, "last_historyid")
+
+    def test_server_error_left_after_retries_keeps_the_message_for_next_run(self):
+        """A message Gmail still fails to return after the retries (5xx) is fetched again on a later run."""
+        account, mock_log = self._sync_message_error(
+            _throttled(status=503, reason="backendError")
+        )
+        mock_log.assert_not_called()
+        self.assertEqual(self._last_historyid(account), 100)
+        self.assertTrue(is_sync_paused(TEST_USER))
+
+    def test_server_error_in_initial_import_keeps_the_message_for_next_run(self):
+        """The same holds while importing a label's threads for the first time."""
+        account = _reset_account_for_sync(last_historyid=0)
+        gmail = MagicMock()
+        gmail.users().threads().list.return_value.execute.return_value = {
+            "threads": [{"id": "t-503"}]
+        }
+        gmail.users().threads().get.return_value.execute.return_value = {
+            "messages": [{"id": "m-503", "historyId": "10"}]
+        }
+        gmail.users().messages().get.return_value.execute.side_effect = _throttled(
+            status=503, reason="backendError"
+        )
+        mock_log = self._sync(gmail)
+        mock_log.assert_not_called()
+        self.assertEqual(self._last_historyid(account), 0)
+        self.assertTrue(is_sync_paused(TEST_USER))
+
+    def test_deleted_message_is_skipped(self):
+        """A message deleted since it was listed (404) is skipped and the sync moves on."""
+        account, mock_log = self._sync_message_error(
+            _throttled(status=404, reason="notFound")
+        )
+        mock_log.assert_not_called()
+        self.assertEqual(self._last_historyid(account), 500)
+        self.assertFalse(is_sync_paused(TEST_USER))
+
+    def test_other_message_error_is_logged(self):
+        """Any other error fetching a message is logged for its label instead of being ignored."""
+        _, mock_log = self._sync_message_error(
+            _throttled(status=400, reason="invalidArgument")
+        )
+        mock_log.assert_called_once()
+        self.assertFalse(is_sync_paused(TEST_USER))
+
     def test_paused_mailbox_is_not_synced(self):
         """While a mailbox is paused, its sync job returns without calling Gmail."""
         _reset_account_for_sync(last_historyid=100)

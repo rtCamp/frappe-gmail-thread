@@ -159,6 +159,15 @@ def is_rate_limit_error(error: Exception) -> bool:
     )
 
 
+def is_temporary_error(error: Exception) -> bool:
+    """Gmail can't serve the sync right now: a rate limit, or a server error left after the retries."""
+    if is_rate_limit_error(error):
+        return True
+    return (
+        isinstance(error, googleapiclient.errors.HttpError) and error.status_code >= 500
+    )
+
+
 def get_retry_after(error: googleapiclient.errors.HttpError) -> int:
     """Seconds to wait as asked by Google's Retry-After header, else a default."""
     value = str((error.resp or {}).get("retry-after") or "").strip()
@@ -325,14 +334,10 @@ def sync(user=None):
                                 .execute(num_retries=GMAIL_API_RETRIES)
                             )
                         except googleapiclient.errors.HttpError as e:
-                            if is_rate_limit_error(e):
+                            # skip a message deleted since it was listed; any other
+                            # error ends the label, so the message isn't skipped for good
+                            if e.status_code != 404:
                                 raise
-                            if hasattr(e, "error_details"):
-                                for error in e.error_details:
-                                    if error.get("reason") == "notFound":
-                                        break
-                            else:
-                                raise e
                             continue
                         if "DRAFT" in raw_email.get("labelIds", []):
                             continue
@@ -461,14 +466,10 @@ def sync(user=None):
                                     .execute(num_retries=GMAIL_API_RETRIES)
                                 )
                             except googleapiclient.errors.HttpError as e:
-                                if is_rate_limit_error(e):
+                                # skip a message deleted since it was listed; any other
+                                # error ends the label, so the message isn't skipped for good
+                                if e.status_code != 404:
                                     raise
-                                if hasattr(e, "error_details"):
-                                    for error in e.error_details:
-                                        if error.get("reason") == "notFound":
-                                            break
-                                else:
-                                    raise e
                                 continue
                             if "DRAFT" in raw_email.get("labelIds", []):
                                 continue
@@ -566,8 +567,8 @@ def sync(user=None):
                             docname=docname,
                         )
         except Exception as e:
-            if is_rate_limit_error(e):
-                # Stop here and wait out the limit. Go back to the sync position
+            if is_temporary_error(e):
+                # Stop here and wait it out. Go back to the sync position
                 # this run started from, as labels already done may have moved it
                 # past emails of the labels not reached yet.
                 pause_sync(user, get_retry_after(e))
@@ -579,7 +580,7 @@ def sync(user=None):
                     update_modified=False,
                 )
                 frappe.logger("frappe_gmail_thread").warning(
-                    f"Gmail rate-limited the sync of {user}; paused"
+                    f"Gmail sync of {user} paused after HTTP {e.status_code}"
                 )
                 return
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")
