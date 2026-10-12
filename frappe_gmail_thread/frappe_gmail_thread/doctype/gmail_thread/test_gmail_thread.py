@@ -507,6 +507,9 @@ class TestSyncRateLimits(_GmailThreadTestCase):
     def _sync(self, gmail, **patches):
         with as_user("Administrator"):
             with (
+                change_settings(
+                    "Google Settings", enable=1, client_id="cid", client_secret="csec"
+                ),
                 patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail),
                 patch(f"{GMAIL_THREAD_MODULE}.frappe.log_error") as mock_log,
             ):
@@ -655,6 +658,9 @@ class TestInitialSyncThreadCap(_GmailThreadTestCase):
         )
         with as_user("Administrator"):
             with (
+                change_settings(
+                    "Google Settings", enable=1, client_id="cid", client_secret="csec"
+                ),
                 patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail),
                 patch(
                     f"{GMAIL_THREAD_MODULE}.get_max_threads_per_label", return_value=5
