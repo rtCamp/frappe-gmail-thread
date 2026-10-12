@@ -510,12 +510,13 @@ class TestInitialSyncTransactions(_GmailThreadTestCase):
         return thread_id, mock_commit.call_count
 
     def test_commits_once_per_thread_not_per_email(self):
-        """A thread with several emails costs as many commits as a thread with one."""
+        """A thread is committed once, whatever its number of emails, then the label's sync position once."""
         _, one_email = self._sync_thread(["2026-01-01 10:00:00"])
         _, three_emails = self._sync_thread(
             ["2026-01-01 10:00:00", "2026-01-01 11:00:00", "2026-01-01 12:00:00"]
         )
-        self.assertEqual(three_emails, one_email)
+        self.assertEqual(one_email, 2)
+        self.assertEqual(three_emails, 2)
 
     def test_thread_dates_and_owner_come_from_its_emails(self):
         """modified is the latest email's date, creation the earliest's, owner the account's user, whatever the order."""
