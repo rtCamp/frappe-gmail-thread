@@ -285,6 +285,7 @@ class TestCreateNewEmail(IntegrationTestCase):
         email = _build_email_dict(
             msg_id="m-keep-modified", message_id="<keep-modified@x.com>"
         )
+        email["threadId"] = "keep-modified-this-mailbox"
         with self.assertRaises(AlreadyExistsError):
             create_new_email(email, self.account)
         involved = frappe.get_all(
@@ -293,6 +294,31 @@ class TestCreateNewEmail(IntegrationTestCase):
         self.assertIn(TEST_USER, involved)
         self.assertEqual(
             frappe.db.get_value("Gmail Thread", thread.name, "modified"), last_email_at
+        )
+        # this mailbox's later emails in its thread find the same Gmail Thread
+        self.assertEqual(
+            find_gmail_thread("keep-modified-this-mailbox").name, thread.name
+        )
+
+    def test_records_mailbox_thread_id_when_user_already_involved(self):
+        """The mailbox's Gmail thread id is recorded on the existing thread even if its user is already listed."""
+        thread = make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id="known-user-thread",
+            involved_users=[TEST_USER],
+            emails=[{"gmail_message_id": "mid-known-user"}],
+        )
+        frappe.db.set_value(
+            "Single Email CT", "mid-known-user", "email_message_id", "known-user@x.com"
+        )
+        email = _build_email_dict(
+            msg_id="m-known-user", message_id="<known-user@x.com>"
+        )
+        email["threadId"] = "known-user-other-thread-id"
+        with self.assertRaises(AlreadyExistsError):
+            create_new_email(email, self.account)
+        self.assertEqual(
+            find_gmail_thread("known-user-other-thread-id").name, thread.name
         )
 
 

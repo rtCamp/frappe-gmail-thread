@@ -15,6 +15,7 @@ from frappe.utils import get_datetime, get_string_between
 from frappe_gmail_thread.api.oauth import get_gmail_object
 from frappe_gmail_thread.utils.helpers import (
     AlreadyExistsError,
+    add_thread_id_reference,
     add_thread_references,
     create_new_email,
     find_gmail_thread,
@@ -187,11 +188,17 @@ def get_email_participants(email_object, linked_user: str) -> set[str]:
     }
 
 
-def add_participants(gmail_thread: Document, participants: set[str]) -> None:
-    """Add participants to an imported thread, keeping `modified` at its latest email's date."""
+def add_participants(
+    gmail_thread: Document, participants: set[str], thread_id: str | None = None
+) -> None:
+    """Add participants, and the mailbox's Gmail thread id, to an imported thread.
+
+    `modified` stays at the thread's latest email's date.
+    """
     before = len(gmail_thread.involved_users)
     update_involved_users(gmail_thread, participants)
-    if len(gmail_thread.involved_users) != before:
+    new_reference = add_thread_id_reference(gmail_thread, thread_id)
+    if new_reference or len(gmail_thread.involved_users) != before:
         prev_modified = gmail_thread.modified
         gmail_thread.save(ignore_permissions=True)
         frappe.db.set_value(
@@ -274,7 +281,7 @@ def sync(user=None):
                                 gmail_thread = lock_gmail_thread(gmail_thread.name)
                                 participants = get_message_participants(message_headers)
                                 participants.add(gmail_account.linked_user)
-                                add_participants(gmail_thread, participants)
+                                add_participants(gmail_thread, participants, thread_id)
                                 frappe.db.commit()  # nosemgrep
                             continue
                         try:
@@ -325,6 +332,7 @@ def sync(user=None):
                                     get_email_participants(
                                         email_object, gmail_account.linked_user
                                     ),
+                                    thread_id,
                                 )
                                 frappe.db.commit()  # nosemgrep
                                 continue
@@ -474,6 +482,7 @@ def sync(user=None):
                                         get_email_participants(
                                             email_object, gmail_account.linked_user
                                         ),
+                                        thread_id,
                                     )
                                     frappe.db.commit()  # nosemgrep
                                     continue
