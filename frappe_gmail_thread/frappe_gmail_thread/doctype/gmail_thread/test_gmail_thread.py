@@ -798,15 +798,15 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
 
     def test_initial_sync_adds_user_to_thread_imported_by_another_mailbox(self):
         """An email another mailbox imported under its own Gmail thread id adds this mailbox's user to that thread."""
-        _reset_account_for_sync(last_historyid=0)
+        account = _reset_account_for_sync(last_historyid=0)
         frappe.db.set_value("User", TEST_USER, "user_type", "System User")
         make_test_user(TEST_USER_2)
-        with as_user(TEST_USER_2):
-            other_account = make_test_gmail_account(linked_user=TEST_USER_2)
         key = frappe.generate_hash(length=10)
         rfc_message_id = f"shared-{key}@x.com"
+        # imported by TEST_USER_2's mailbox, under that mailbox's thread id; the thread's
+        # Gmail Account isn't looked at, and a second one would outlive this class (sync commits)
         other_thread = make_test_gmail_thread(
-            gmail_account=other_account.name,
+            gmail_account=account.name,
             gmail_thread_id=f"t-other-{key}",
             involved_users=[TEST_USER_2],
             emails=[
