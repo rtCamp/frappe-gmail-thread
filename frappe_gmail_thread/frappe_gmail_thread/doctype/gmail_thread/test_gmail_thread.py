@@ -8,6 +8,7 @@ from frappe.tests import IntegrationTestCase, change_settings
 from frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread import (
     get_permission_query_conditions,
     has_permission,
+    is_not_found_error,
     sync,
     sync_labels,
     update_involved_users,
@@ -268,6 +269,28 @@ class TestSyncLabels(_GmailThreadTestCase):
             sync_labels(account, should_save=False)
         self.assertEqual([x.label_id for x in account.labels], ["INBOX"])
 
+    def test_drops_labels_deleted_in_gmail_without_resetting_sync(self):
+        """Fetching labels removes the ones deleted in Gmail and keeps the sync position."""
+        account = _reset_account_for_sync(
+            last_historyid=100,
+            labels=(("INBOX", True), ("Label_gone", False)),
+        )
+        gmail = self._gmail_with_labels([{"id": "INBOX", "name": "INBOX"}])
+        with change_settings(
+            "Google Settings", enable=1, client_id="cid", client_secret="csec"
+        ):
+            with patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail):
+                sync_labels(account, should_save=True)
+        self.assertEqual(
+            frappe.get_all(
+                "Gmail Label", filters={"parent": account.name}, pluck="label_id"
+            ),
+            ["INBOX"],
+        )
+        self.assertEqual(
+            frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 100
+        )
+
     def test_does_not_save_when_should_save_false(self):
         """When should_save=False the account's save() is not invoked."""
         account = frappe.get_doc("Gmail Account", self.account.name)
@@ -451,6 +474,31 @@ class TestSyncPreconditions(_GmailThreadTestCase):
         gmail.users().history().list.assert_not_called()
 
 
+class TestIsNotFoundError(_GmailThreadTestCase):
+    def _error(self, status, content):
+        return googleapiclient.errors.HttpError(
+            resp=MagicMock(status=status, reason=""), content=content
+        )
+
+    def test_recognises_gmail_not_found_payload(self):
+        """The 404 body Gmail returns for a missing label / expired history id is recognised."""
+        content = (
+            b'{"error": {"code": 404, "message": "Requested entity was not found.",'
+            b' "errors": [{"message": "Requested entity was not found.",'
+            b' "domain": "global", "reason": "notFound"}], "status": "NOT_FOUND"}}'
+        )
+        self.assertTrue(is_not_found_error(self._error(404, content)))
+
+    def test_other_errors_are_not_not_found(self):
+        """A rate-limit error, or a body that isn't JSON, isn't treated as not-found."""
+        rate_limited = (
+            b'{"error": {"code": 429, "message": "Too many requests",'
+            b' "errors": [{"reason": "rateLimitExceeded"}]}}'
+        )
+        self.assertFalse(is_not_found_error(self._error(429, rate_limited)))
+        self.assertFalse(is_not_found_error(self._error(502, b"Bad Gateway")))
+
+
 class TestSyncErrorHandling(_GmailThreadTestCase):
     def test_resets_last_historyid_on_history_api_not_found(self):
         """A notFound HttpError from history().list resets last_historyid to 0."""
@@ -467,6 +515,86 @@ class TestSyncErrorHandling(_GmailThreadTestCase):
                     f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail
                 ):
                     sync(user=TEST_USER)
+        self.assertEqual(
+            frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 0
+        )
+
+    def _gmail_with_history(self, deleted_labels, expired_labels=()):
+        """Gmail mock: history().list 404s for deleted/expired labels; labels().get 404s only for deleted ones."""
+        gmail = MagicMock()
+
+        def history_list(**kwargs):
+            m = MagicMock()
+            if kwargs["labelId"] in (*deleted_labels, *expired_labels):
+                m.execute.side_effect = _make_http_error("notFound")
+            else:
+                m.execute.return_value = {"history": [], "historyId": "500"}
+            return m
+
+        def labels_get(userId, id):
+            m = MagicMock()
+            if id in deleted_labels:
+                m.execute.side_effect = _make_http_error("notFound")
+            else:
+                m.execute.return_value = {"id": id}
+            return m
+
+        gmail.users().history().list.side_effect = history_list
+        gmail.users().labels().get.side_effect = labels_get
+        return gmail
+
+    def _label_ids(self, account_name):
+        return set(
+            frappe.get_all(
+                "Gmail Label", filters={"parent": account_name}, pluck="label_id"
+            )
+        )
+
+    def test_label_deleted_in_gmail_is_dropped_without_resetting_sync(self):
+        """A history 404 for a label Gmail no longer has removes that label and keeps syncing the others incrementally."""
+        account = _reset_account_for_sync(
+            last_historyid=100,
+            labels=(("Label_deleted", True), ("INBOX", True)),
+        )
+        gmail = self._gmail_with_history(deleted_labels=("Label_deleted",))
+        with as_user("Administrator"):
+            with (
+                patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail),
+                patch(f"{GMAIL_THREAD_MODULE}.frappe.log_error") as mock_log,
+            ):
+                sync(user=TEST_USER)
+        mock_log.assert_not_called()
+        self.assertEqual(self._label_ids(account.name), {"INBOX"})
+        # INBOX was still synced and the sync position moved forward, not back to 0
+        self.assertEqual(
+            frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 500
+        )
+
+    def test_expired_history_still_resets_sync(self):
+        """A history 404 for a label that still exists means the history id expired: reset for an initial sync."""
+        account = _reset_account_for_sync(last_historyid=100)
+        gmail = self._gmail_with_history(deleted_labels=(), expired_labels=("INBOX",))
+        with as_user("Administrator"):
+            with patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail):
+                sync(user=TEST_USER)
+        self.assertEqual(
+            frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 0
+        )
+        self.assertEqual(self._label_ids(account.name), {"INBOX"})
+
+    def test_reset_after_a_dropped_label_does_not_restore_it(self):
+        """When one label was deleted in Gmail and another's history expired, the reset keeps the deleted label out."""
+        account = _reset_account_for_sync(
+            last_historyid=100,
+            labels=(("Label_deleted", True), ("INBOX", True)),
+        )
+        gmail = self._gmail_with_history(
+            deleted_labels=("Label_deleted",), expired_labels=("INBOX",)
+        )
+        with as_user("Administrator"):
+            with patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail):
+                sync(user=TEST_USER)
+        self.assertEqual(self._label_ids(account.name), {"INBOX"})
         self.assertEqual(
             frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 0
         )

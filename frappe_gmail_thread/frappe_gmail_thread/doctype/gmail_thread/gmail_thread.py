@@ -118,6 +118,21 @@ def sync_labels(account_name: str | Document, should_save: bool = True):
     gmail = get_gmail_object(gmail_account)
     labels = gmail.users().labels().list(userId="me").execute()
 
+    gmail_label_ids = {label["id"] for label in labels["labels"]}
+    deleted = [x for x in gmail_account.labels if x.label_id not in gmail_label_ids]
+    if deleted:
+        # labels deleted in Gmail. Delete the rows directly too, so saving the
+        # account below doesn't see a label change and reset the sync
+        frappe.db.delete(
+            "Gmail Label",
+            {
+                "parent": gmail_account.name,
+                "label_id": ["in", [x.label_id for x in deleted]],
+            },
+        )
+        for row in deleted:
+            gmail_account.remove(row)
+
     available_labels = [x.label_id for x in gmail_account.labels]
 
     for label in labels["labels"]:
@@ -130,6 +145,24 @@ def sync_labels(account_name: str | Document, should_save: bool = True):
         )
     if should_save:
         gmail_account.save()
+
+
+def is_not_found_error(error: googleapiclient.errors.HttpError) -> bool:
+    details = error.error_details if isinstance(error.error_details, list) else []
+    return any(
+        isinstance(detail, dict) and detail.get("reason") == "notFound"
+        for detail in details
+    )
+
+
+def gmail_label_exists(gmail, label_id: str) -> bool:
+    try:
+        gmail.users().labels().get(userId="me", id=label_id).execute()
+    except googleapiclient.errors.HttpError as e:
+        if is_not_found_error(e):
+            return False
+        raise
+    return True
 
 
 def get_message_headers(message):
@@ -356,16 +389,23 @@ def sync(user=None):
                         .execute()
                     )
                 except googleapiclient.errors.HttpError as e:
-                    # If notFound, update historyid to the value returned by API (if any)
-                    # You won't find history id in error, so just reset to 0 and let next sync do initial sync
-                    if hasattr(e, "error_details"):
-                        for error in e.error_details:
-                            if error.get("reason") == "notFound":
-                                gmail_account.last_historyid = 0
-                                gmail_account.save(ignore_permissions=True)
-                                frappe.db.commit()
-                                return
-                    raise e
+                    if not is_not_found_error(e):
+                        raise e
+                    if not gmail_label_exists(gmail, label_id):
+                        # deleted in Gmail. Delete the row directly: saving the
+                        # account with changed labels would reset the whole sync
+                        frappe.db.delete(
+                            "Gmail Label",
+                            {"parent": gmail_account.name, "label_id": label_id},
+                        )
+                        continue
+                    # The label exists, so startHistoryId is too old. The error
+                    # carries no newer history id: reset to 0 for an initial sync
+                    gmail_account.reload()
+                    gmail_account.last_historyid = 0
+                    gmail_account.save(ignore_permissions=True)
+                    frappe.db.commit()
+                    return
 
                 new_history_id = int(history.get("historyId", last_history_id))
                 if new_history_id > max_history_id:
