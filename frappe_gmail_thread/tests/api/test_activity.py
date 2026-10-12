@@ -183,6 +183,49 @@ class TestGetLinkedGmailThreads(IntegrationTestCase):
             sum(len(e["template_data"]["doc"]["attachments"]) for e in many), 10
         )
 
+    def test_user_sees_threads_of_a_document_they_can_read(self):
+        """A user who can read the linked document sees its threads, without owning them or being involved in them."""
+        reader = "test_fgt_timeline_reader@example.com"
+        make_test_user(reader)
+        # a user without roles is saved as a Website User; desk users get the Desk User role
+        frappe.db.set_value("User", reader, "user_type", "System User")
+        frappe.clear_cache(user=reader)
+        readable = frappe.get_doc(
+            {"doctype": "ToDo", "description": "Timeline", "allocated_to": reader}
+        ).insert(ignore_permissions=True)
+        unreadable = frappe.get_doc(
+            {"doctype": "ToDo", "description": "Timeline, someone else's"}
+        ).insert(ignore_permissions=True)
+        for thread_id, todo, subject in (
+            ("timeline-reader-1", readable, "On the readable ToDo"),
+            ("timeline-reader-2", unreadable, "On someone else's ToDo"),
+        ):
+            make_test_gmail_thread(
+                gmail_account=self.account.name,
+                gmail_thread_id=thread_id,
+                reference_doctype="ToDo",
+                reference_name=todo.name,
+                emails=[
+                    {
+                        "gmail_message_id": f"{thread_id}-mid",
+                        "email_message_id": f"{thread_id}@x.com",
+                        "subject": subject,
+                        "sender": TEST_USER,
+                        "attachments_data": "[]",
+                    }
+                ],
+            )
+
+        with as_user(reader):
+            result = get_linked_gmail_threads("ToDo", readable.name)
+            with self.assertRaises(frappe.PermissionError):
+                get_linked_gmail_threads("ToDo", unreadable.name)
+
+        self.assertEqual(
+            [r["template_data"]["doc"]["subject"] for r in result],
+            ["On the readable ToDo"],
+        )
+
     def test_returns_empty_list_when_no_thread_references_the_doc(self):
         """get_linked_gmail_threads returns [] when no Gmail Thread points at the supplied (doctype, docname)."""
         result = get_linked_gmail_threads("User", "no-such-user@example.com")
