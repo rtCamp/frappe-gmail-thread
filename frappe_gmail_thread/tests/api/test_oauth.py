@@ -4,6 +4,7 @@ import frappe
 from frappe.tests import IntegrationTestCase, change_settings
 
 from frappe_gmail_thread.api.oauth import (
+    GmailAuthorizationExpiredError,
     authorize_access,
     callback,
     check_gmail_object,
@@ -174,7 +175,7 @@ class TestCheckGmailObject(IntegrationTestCase):
         """check_gmail_object throws a clear 'authorization expired' error when Google returns invalid_grant."""
         gmail = MagicMock()
         gmail.users().getProfile().execute.side_effect = Exception("invalid_grant")
-        with self.assertRaises(frappe.ValidationError) as ctx:
+        with self.assertRaises(GmailAuthorizationExpiredError) as ctx:
             check_gmail_object(self.account, gmail)
         self.assertIn("authorization has expired", str(ctx.exception))
 

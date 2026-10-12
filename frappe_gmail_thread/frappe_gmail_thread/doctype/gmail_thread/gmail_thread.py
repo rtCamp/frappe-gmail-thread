@@ -12,7 +12,11 @@ from frappe.model.document import Document
 from frappe.permissions import get_doctypes_with_read
 from frappe.utils import get_datetime, get_string_between
 
-from frappe_gmail_thread.api.oauth import get_gmail_object
+from frappe_gmail_thread.api.oauth import (
+    GmailAuthorizationExpiredError,
+    get_gmail_object,
+    handle_expired_authorization,
+)
 from frappe_gmail_thread.utils.helpers import (
     AlreadyExistsError,
     add_thread_references,
@@ -176,14 +180,18 @@ def sync(user=None):
     if user:
         frappe.set_user(user)  # nosemgrep:
     user = frappe.session.user
-    gmail_account = frappe.get_doc("Gmail Account", {"linked_user": user})
-    if not gmail_account.gmail_enabled:
-        frappe.throw(_("Please configure Gmail in Email Account."))
-    if not gmail_account.refresh_token:
-        frappe.throw(
-            _("Please authorize Gmail by clicking on 'Authorize Gmail' button.")
-        )
-    gmail = get_gmail_object(gmail_account)
+    account_name = frappe.db.get_value("Gmail Account", {"linked_user": user})
+    if not account_name:
+        return
+    gmail_account = frappe.get_doc("Gmail Account", account_name)
+    # the account can be disabled or lose its authorization while this job is queued
+    if not gmail_account.gmail_enabled or not gmail_account.refresh_token:
+        return
+    try:
+        gmail = get_gmail_object(gmail_account)
+    except GmailAuthorizationExpiredError:
+        handle_expired_authorization(gmail_account)
+        return
     label_ids = [x.label_id for x in gmail_account.labels if x.enabled]
     if not label_ids:
         return
