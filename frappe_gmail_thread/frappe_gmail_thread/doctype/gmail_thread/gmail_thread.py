@@ -159,6 +159,50 @@ def get_message_participants(headers):
     return participants
 
 
+def lock_gmail_thread(name: str) -> Document:
+    """Load the thread with its row locked until the next commit.
+
+    Syncs of different mailboxes update the same thread. A copy read before
+    another sync's commit fails the timestamp check on save, so every update
+    starts from a locked, current copy and commits right after saving.
+    """
+    return frappe.get_doc("Gmail Thread", name, for_update=True)
+
+
+def thread_has_email(gmail_thread: Document, email: Document) -> bool:
+    return any(
+        row.gmail_message_id == email.gmail_message_id
+        or (email.email_message_id and row.email_message_id == email.email_message_id)
+        for row in gmail_thread.emails
+    )
+
+
+def get_email_participants(email_object, linked_user: str) -> set[str]:
+    return {
+        email_object.from_email,
+        *email_object.to,
+        *email_object.cc,
+        *email_object.bcc,
+        linked_user,
+    }
+
+
+def add_participants(gmail_thread: Document, participants: set[str]) -> None:
+    """Add participants to an imported thread, keeping `modified` at its latest email's date."""
+    before = len(gmail_thread.involved_users)
+    update_involved_users(gmail_thread, participants)
+    if len(gmail_thread.involved_users) != before:
+        prev_modified = gmail_thread.modified
+        gmail_thread.save(ignore_permissions=True)
+        frappe.db.set_value(
+            "Gmail Thread",
+            gmail_thread.name,
+            "modified",
+            prev_modified,
+            update_modified=False,
+        )
+
+
 def gmail_message_exists(gmail_message_id, rfc_message_id=None):
     """Return True if this message was already imported."""
     if gmail_message_id and frappe.db.exists(
@@ -223,22 +267,11 @@ def sync(user=None):
                             message["id"], get_rfc_message_id(message_headers)
                         ):
                             if gmail_thread:
-                                gmail_thread.reload()
+                                gmail_thread = lock_gmail_thread(gmail_thread.name)
                                 participants = get_message_participants(message_headers)
                                 participants.add(gmail_account.linked_user)
-                                before = len(gmail_thread.involved_users)
-                                update_involved_users(gmail_thread, participants)
-                                if len(gmail_thread.involved_users) != before:
-                                    prev_modified = gmail_thread.modified
-                                    gmail_thread.save(ignore_permissions=True)
-                                    frappe.db.commit()  # nosemgrep
-                                    frappe.db.set_value(
-                                        "Gmail Thread",
-                                        gmail_thread.name,
-                                        "modified",
-                                        prev_modified,
-                                        update_modified=False,
-                                    )
+                                add_participants(gmail_thread, participants)
+                                frappe.db.commit()  # nosemgrep
                             continue
                         try:
                             raw_email = (
@@ -263,6 +296,8 @@ def sync(user=None):
                                 raw_email, gmail_account
                             )
                         except AlreadyExistsError:
+                            # releases the thread create_new_email locked
+                            frappe.db.commit()  # nosemgrep
                             continue
                         if not gmail_thread:
                             email_message_id = email_object.message_id
@@ -278,7 +313,17 @@ def sync(user=None):
                                 thread_id, [email_message_id] + email_references
                             )
                         if gmail_thread:
-                            gmail_thread.reload()
+                            gmail_thread = lock_gmail_thread(gmail_thread.name)
+                            if thread_has_email(gmail_thread, email):
+                                # imported by another mailbox's sync while this one waited
+                                add_participants(
+                                    gmail_thread,
+                                    get_email_participants(
+                                        email_object, gmail_account.linked_user
+                                    ),
+                                )
+                                frappe.db.commit()  # nosemgrep
+                                continue
                         else:
                             gmail_thread = frappe.new_doc("Gmail Thread")
                             gmail_thread.gmail_thread_id = thread_id
@@ -313,7 +358,6 @@ def sync(user=None):
                         gmail_thread.append("emails", email, position=pos)
                         latest_dt = gmail_thread.emails[-1].date_and_time
                         gmail_thread.save(ignore_permissions=True)
-                        frappe.db.commit()  # nosemgrep
                         frappe.db.set_value(
                             "Gmail Thread",
                             gmail_thread.name,
@@ -337,6 +381,7 @@ def sync(user=None):
                             modified_by=gmail_account.linked_user,
                             update_modified=False,
                         )
+                        frappe.db.commit()  # nosemgrep
                 gmail_account.reload()
                 gmail_account.last_historyid = max_history_id
                 gmail_account.save(ignore_permissions=True)
@@ -400,6 +445,8 @@ def sync(user=None):
                                     raw_email, gmail_account
                                 )
                             except AlreadyExistsError:
+                                # releases the thread create_new_email locked
+                                frappe.db.commit()  # nosemgrep
                                 continue
                             if not gmail_thread:
                                 email_message_id = email_object.message_id
@@ -414,7 +461,19 @@ def sync(user=None):
                                 gmail_thread = find_gmail_thread(
                                     thread_id, [email_message_id] + email_references
                                 )
-                            if not gmail_thread:
+                            if gmail_thread:
+                                gmail_thread = lock_gmail_thread(gmail_thread.name)
+                                if thread_has_email(gmail_thread, email):
+                                    # imported by another mailbox's sync while this one waited
+                                    add_participants(
+                                        gmail_thread,
+                                        get_email_participants(
+                                            email_object, gmail_account.linked_user
+                                        ),
+                                    )
+                                    frappe.db.commit()  # nosemgrep
+                                    continue
+                            else:
                                 gmail_thread = frappe.new_doc("Gmail Thread")
                                 gmail_thread.gmail_thread_id = thread_id
                                 gmail_thread.gmail_account = gmail_account.name
@@ -463,6 +522,8 @@ def sync(user=None):
                                     email.date_and_time,
                                     update_modified=False,
                                 )
+                            # don't keep the thread locked for the rest of the label
+                            frappe.db.commit()  # nosemgrep
                             if (
                                 gmail_thread.reference_doctype
                                 and gmail_thread.reference_name
@@ -484,6 +545,11 @@ def sync(user=None):
                             doctype=doctype,
                             docname=docname,
                         )
+        except (frappe.QueryDeadlockError, frappe.QueryTimeoutError) as e:
+            # a thread stayed locked by another sync: retry the whole job, which
+            # rolls back, instead of skipping this label's remaining emails
+            frappe.db.rollback()
+            raise frappe.RetryBackgroundJobError from e
         except Exception:
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")
             continue

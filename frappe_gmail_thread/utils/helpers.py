@@ -223,7 +223,10 @@ def create_new_email(email, gmail_account):
             "Single Email CT", {"email_message_id": email_object.message_id}
         )
         if email_ct:
-            gmail_thread = frappe.get_doc("Gmail Thread", email_ct.parent)
+            # locked, as concurrent syncs of other mailboxes update this thread
+            gmail_thread = frappe.get_doc(
+                "Gmail Thread", email_ct.parent, for_update=True
+            )
             involved_users_linked = [
                 user.account for user in gmail_thread.involved_users
             ]
