@@ -47,6 +47,11 @@ def update_gmail_watches() -> None:
 
 def apply_realtime_setting_to_watches(realtime: bool | int) -> None:
     """Start (`realtime` truthy) or stop the Gmail watch of every enabled, authorized mailbox."""
+    if realtime:
+        google_settings = frappe.get_single("Google Settings")
+        # same rule as the daily watch renewal: no watches without the Google API and a topic
+        if not google_settings.enable or not google_settings.custom_gmail_pubsub_topic:
+            return
     gmail_accounts = frappe.get_all(
         "Gmail Account",
         filters={"gmail_enabled": 1, "refresh_token": ["is", "set"]},
@@ -55,7 +60,7 @@ def apply_realtime_setting_to_watches(realtime: bool | int) -> None:
     if not gmail_accounts:
         return
     if realtime:
-        # same rule as the daily watch renewal: disabled users get no watch
+        # disabled users get no watch either
         enabled_users = set(
             frappe.get_all(
                 "User",

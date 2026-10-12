@@ -57,8 +57,10 @@ class TestOnUpdate(IntegrationTestCase):
         cls.disabled_user = _account(DISABLED_USER, gmail_enabled=1, refresh_token="rt")
         frappe.db.set_value("User", DISABLED_USER, "enabled", 0)
 
-    def _run(self, realtime):
+    def _run(self, realtime, **settings):
+        settings = {"enable": 1, "custom_gmail_pubsub_topic": "topic", **settings}
         with (
+            change_settings("Google Settings", **settings),
             patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.enable_pubsub") as mock_enable,
             patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.disable_pubsub") as mock_disable,
         ):
@@ -97,6 +99,12 @@ class TestOnUpdate(IntegrationTestCase):
         self.assertNotIn(self.disabled_user, called)
         mock_disable.assert_not_called()
 
+    def test_realtime_on_starts_no_watch_without_google_api_or_topic(self):
+        """Like the daily renewal, no watch is started while the Google API is disabled or no topic is set."""
+        for settings in ({"enable": 0}, {"custom_gmail_pubsub_topic": ""}):
+            mock_enable, _ = self._run(realtime=1, **settings)
+            mock_enable.assert_not_called()
+
     def test_realtime_off_stops_watches_of_enabled_authorized_accounts(self):
         """With real-time sync off, the watch of each enabled, authorized account is stopped, a disabled user's included."""
         mock_enable, mock_disable = self._run(realtime=0)
@@ -117,6 +125,9 @@ class TestOnUpdate(IntegrationTestCase):
             started.append(account.name)
 
         with (
+            change_settings(
+                "Google Settings", enable=1, custom_gmail_pubsub_topic="topic"
+            ),
             patch(
                 f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.enable_pubsub", side_effect=enable
             ),
