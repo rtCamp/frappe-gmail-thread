@@ -20,13 +20,6 @@ class GmailAccount(Document):
         self.email_id = frappe.get_value("User", self.linked_user, "email")
 
     def on_trash(self):
-        if not self.gmail_enabled:
-            return
-        if not self.refresh_token:
-            return
-        google_settings = frappe.get_single("Google Settings")
-        if not google_settings.custom_gmail_pubsub_topic:
-            return
         disable_pubsub(self)
 
     def validate(self):
@@ -76,6 +69,8 @@ class GmailAccount(Document):
                         "Please set Client ID and Client Secret in Google Settings to enable Gmail"
                     )
                 )
+        if self.has_value_changed("gmail_enabled") and not self.gmail_enabled:
+            disable_pubsub(self)
         if self.has_value_changed("refresh_token") and self.refresh_token:
             sync_labels(self, should_save=False)
             google_settings = frappe.get_single("Google Settings")
