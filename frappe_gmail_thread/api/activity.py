@@ -47,6 +47,7 @@ def get_file_urls(attachments_lists: Iterable[list]) -> dict[str, str]:
             "File",
             filters={"name": ("in", list(file_doc_names))},
             fields=["name", "file_url"],
+            limit=0,
         )
     }
 
@@ -86,6 +87,7 @@ def get_linked_gmail_threads(doctype: str, docname: str | int) -> list[dict]:
             "reference_name": docname,
         },
         fields=["name", "_liked_by", "reference_doctype", "reference_name"],
+        limit=0,
     )
     if not gmail_threads:
         return []

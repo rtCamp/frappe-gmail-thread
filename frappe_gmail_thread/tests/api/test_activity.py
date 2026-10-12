@@ -183,6 +183,18 @@ class TestGetLinkedGmailThreads(IntegrationTestCase):
             sum(len(e["template_data"]["doc"]["attachments"]) for e in many), 10
         )
 
+    def test_returns_every_linked_thread_and_attachment(self):
+        """More threads and attachments than a list page (20) are all returned."""
+        target = "test_fgt_timeline_many@example.com"
+        make_test_user(target)
+        for i in range(21):
+            self._make_linked_thread(f"timeline-many-{i}", target, n_emails=1)
+        result = get_linked_gmail_threads("User", target)
+        self.assertEqual(len({entry["name"] for entry in result}), 21)
+        self.assertEqual(
+            sum(len(e["template_data"]["doc"]["attachments"]) for e in result), 21
+        )
+
     def test_user_sees_threads_of_a_document_they_can_read(self):
         """A user who can read the linked document sees its threads, without owning them or being involved in them."""
         reader = "test_fgt_timeline_reader@example.com"
