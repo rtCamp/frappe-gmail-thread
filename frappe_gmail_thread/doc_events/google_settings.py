@@ -1,7 +1,11 @@
 import frappe
 from frappe.model.document import Document
+from frappe.utils.synchronization import filelock
 
 from frappe_gmail_thread.api.oauth import disable_pubsub, enable_pubsub
+
+# seconds a queued update waits for the one running; below the long queue's job timeout
+WATCH_UPDATE_LOCK_TIMEOUT = 20 * 60
 
 
 def on_update(doc: Document, method: str | None = None) -> None:
@@ -17,10 +21,19 @@ def on_update(doc: Document, method: str | None = None) -> None:
 
 def update_gmail_watches() -> None:
     """Start or stop the Gmail watch of every authorized mailbox to match the real-time sync setting."""
-    # read when the job runs, so the last of several quick toggles wins
-    realtime = frappe.db.get_single_value(
-        "Google Settings", "custom_gmail_sync_in_realtime"
-    )
+    # Several long workers can pick up these jobs at once. Running them one at a time, each reading
+    # the setting only once it holds the lock, makes the last run apply the last saved value.
+    with filelock("gmail_thread_update_watches", timeout=WATCH_UPDATE_LOCK_TIMEOUT):
+        # new transaction: a snapshot taken before the wait would miss a save made meanwhile
+        frappe.db.rollback()
+        realtime = frappe.db.get_single_value(
+            "Google Settings", "custom_gmail_sync_in_realtime", cache=False
+        )
+        apply_realtime_setting_to_watches(realtime)
+
+
+def apply_realtime_setting_to_watches(realtime: bool | int) -> None:
+    """Start (`realtime` truthy) or stop the Gmail watch of every enabled, authorized mailbox."""
     gmail_accounts = frappe.get_all(
         "Gmail Account",
         filters={"gmail_enabled": 1, "refresh_token": ["is", "set"]},

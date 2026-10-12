@@ -1,9 +1,11 @@
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, change_settings
 
 from frappe_gmail_thread.doc_events.google_settings import (
+    apply_realtime_setting_to_watches,
     on_update,
     update_gmail_watches,
 )
@@ -56,11 +58,10 @@ class TestOnUpdate(IntegrationTestCase):
 
     def _run(self, realtime):
         with (
-            change_settings("Google Settings", custom_gmail_sync_in_realtime=realtime),
             patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.enable_pubsub") as mock_enable,
             patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.disable_pubsub") as mock_disable,
         ):
-            update_gmail_watches()
+            apply_realtime_setting_to_watches(realtime)
         return mock_enable, mock_disable
 
     def test_toggling_realtime_updates_watches_in_background(self):
@@ -115,12 +116,40 @@ class TestOnUpdate(IntegrationTestCase):
             started.append(account.name)
 
         with (
-            change_settings("Google Settings", custom_gmail_sync_in_realtime=1),
             patch(
                 f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.enable_pubsub", side_effect=enable
             ),
             patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.frappe.log_error") as mock_log,
         ):
-            update_gmail_watches()
+            apply_realtime_setting_to_watches(1)
         self.assertIn(self.second, started)
         mock_log.assert_called()
+
+    def test_reads_setting_once_it_holds_the_lock(self):
+        """A run waiting for the lock applies the value saved while it waited, in a fresh transaction."""
+        events = []
+
+        @contextmanager
+        def lock(name, timeout):
+            events.append("locked")
+            # another worker's run finishes and the setting is saved again meanwhile
+            frappe.db.set_single_value(
+                "Google Settings", "custom_gmail_sync_in_realtime", 0
+            )
+            yield
+            events.append("unlocked")
+
+        with (
+            change_settings("Google Settings", custom_gmail_sync_in_realtime=1),
+            patch(f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.filelock", side_effect=lock),
+            # a real rollback would also drop this test's records
+            patch.object(
+                frappe.db, "rollback", side_effect=lambda: events.append("rollback")
+            ),
+            patch(
+                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.apply_realtime_setting_to_watches",
+                side_effect=lambda realtime: events.append(f"apply {realtime}"),
+            ),
+        ):
+            update_gmail_watches()
+        self.assertEqual(events, ["locked", "rollback", "apply 0", "unlocked"])
