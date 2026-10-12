@@ -129,8 +129,11 @@ class TestEnablePubsubEveryday(IntegrationTestCase):
                 patch(
                     f"{DAILY_TASK_MODULE}.handle_expired_authorization"
                 ) as mock_handle,
+                # the handler's row lock is released right away; keep this test's records uncommitted
+                patch.object(frappe.db, "commit") as mock_commit,
             ):
                 enable_pubsub_everyday()
         mock_log.assert_not_called()
         mock_handle.assert_called_once()
         self.assertEqual(mock_handle.call_args.args[0].name, account)
+        mock_commit.assert_called_once()

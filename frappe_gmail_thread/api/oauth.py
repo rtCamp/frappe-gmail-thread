@@ -10,6 +10,7 @@ from frappe.desk.doctype.notification_log.notification_log import (
 )
 from frappe.integrations.google_oauth import GoogleOAuth
 from frappe.model.document import Document
+from frappe.utils import get_datetime
 from frappe.utils.password import remove_encrypted_password
 from googleapiclient.discovery import build
 
@@ -298,6 +299,22 @@ def handle_expired_authorization(gmail_account: Document) -> None:
     triggered syncs and the daily watch renewal, so an expiry is handled once
     instead of failing every sync until someone re-authorizes.
     """
+    # A sync and the daily watch renewal can hit the same expiry, and the owner can
+    # re-authorize in the meantime. Lock the account and act only while it is unchanged
+    # since it was loaded: once per expiry, and never on a newly issued token.
+    current = frappe.db.get_value(
+        "Gmail Account",
+        gmail_account.name,
+        ["refresh_token", "modified"],
+        as_dict=True,
+        for_update=True,
+    )
+    if (
+        not current
+        or not current.refresh_token
+        or get_datetime(current.modified) != get_datetime(gmail_account.modified)
+    ):
+        return
     remove_encrypted_password("Gmail Account", gmail_account.name, "refresh_token")
     frappe.db.set_value(
         "Gmail Account",

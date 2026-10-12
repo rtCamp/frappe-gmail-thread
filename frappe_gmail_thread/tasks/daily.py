@@ -30,6 +30,9 @@ def enable_pubsub_everyday():
             enable_pubsub(gaccount)
         except GmailAuthorizationExpiredError:
             handle_expired_authorization(gaccount)
+            # release the account's row lock now: its owner may re-authorize while the other
+            # mailboxes are processed
+            frappe.db.commit()  # nosemgrep
         except Exception as e:
             frappe.log_error(title="PubSub Error", message=e)
             continue
