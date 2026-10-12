@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 import googleapiclient.errors
 from frappe.tests import IntegrationTestCase, change_settings
+from frappe.utils import get_datetime
 
 from frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread import (
     get_permission_query_conditions,
@@ -794,6 +795,68 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
                 patch(f"{GMAIL_THREAD_MODULE}.find_gmail_thread", return_value=None),
             ):
                 sync(user=TEST_USER)
+
+    def test_initial_sync_adds_user_to_thread_imported_by_another_mailbox(self):
+        """An email another mailbox imported under its own Gmail thread id adds this mailbox's user to that thread."""
+        _reset_account_for_sync(last_historyid=0)
+        frappe.db.set_value("User", TEST_USER, "user_type", "System User")
+        make_test_user(TEST_USER_2)
+        with as_user(TEST_USER_2):
+            other_account = make_test_gmail_account(linked_user=TEST_USER_2)
+        key = frappe.generate_hash(length=10)
+        rfc_message_id = f"shared-{key}@x.com"
+        other_thread = make_test_gmail_thread(
+            gmail_account=other_account.name,
+            gmail_thread_id=f"t-other-{key}",
+            involved_users=[TEST_USER_2],
+            emails=[
+                {
+                    "gmail_message_id": f"m-other-{key}",
+                    "email_message_id": rfc_message_id,
+                    "subject": "Shared",
+                }
+            ],
+        )
+        modified = get_datetime(other_thread.modified)
+        gmail = self._build_initial_gmail(
+            thread_id=f"t-this-{key}", message_id=f"m-this-{key}", label_ids=["INBOX"]
+        )
+        # sent to a group address: this mailbox's user isn't in the headers
+        gmail.users().threads().get.return_value.execute.return_value = {
+            "messages": [
+                {
+                    "id": f"m-this-{key}",
+                    "historyId": "10",
+                    "payload": {
+                        "headers": [
+                            {"name": "Message-ID", "value": f"<{rfc_message_id}>"},
+                            {"name": "From", "value": "someone@example.com"},
+                            {"name": "To", "value": "team@example.com"},
+                        ]
+                    },
+                }
+            ]
+        }
+        with as_user("Administrator"):
+            with (
+                change_settings(
+                    "Google Settings", enable=1, client_id="cid", client_secret="csec"
+                ),
+                patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail),
+                patch(f"{GMAIL_THREAD_MODULE}.create_new_email") as mock_create,
+            ):
+                sync(user=TEST_USER)
+        mock_create.assert_not_called()
+        involved = frappe.get_all(
+            "Involved User", filters={"parent": other_thread.name}, pluck="account"
+        )
+        self.assertIn(TEST_USER, involved)
+        self.assertEqual(
+            frappe.db.count("Single Email CT", {"email_message_id": rfc_message_id}), 1
+        )
+        self.assertEqual(
+            frappe.db.get_value("Gmail Thread", other_thread.name, "modified"), modified
+        )
 
     def test_aggregates_involved_users_from_sender_recipients_and_account_owner(self):
         """update_involved_users is called with the set of sender + to + cc + bcc + the gmail_account's linked_user."""

@@ -263,9 +263,13 @@ def sync(user=None):
                         msg_history_id = int(message.get("historyId", 0))
                         if msg_history_id > max_history_id:
                             max_history_id = msg_history_id
-                        if gmail_message_exists(
-                            message["id"], get_rfc_message_id(message_headers)
-                        ):
+                        rfc_message_id = get_rfc_message_id(message_headers)
+                        if gmail_message_exists(message["id"], rfc_message_id):
+                            if not gmail_thread and rfc_message_id:
+                                # thread ids are per mailbox: another mailbox may have imported it
+                                gmail_thread = find_gmail_thread(
+                                    thread_id, [rfc_message_id]
+                                )
                             if gmail_thread:
                                 gmail_thread = lock_gmail_thread(gmail_thread.name)
                                 participants = get_message_participants(message_headers)
