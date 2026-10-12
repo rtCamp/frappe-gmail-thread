@@ -22,7 +22,7 @@ def on_update(doc: Document, method: str | None = None) -> None:
 
 
 def update_gmail_watches() -> None:
-    """Start or stop the Gmail watch of every authorized mailbox to match the real-time sync setting."""
+    """Start or stop the Gmail watch of every enabled, authorized mailbox to match the real-time sync setting."""
     # Several long workers can pick up these jobs at once. One runs at a time, and it repeats
     # until the value it applied is still the saved one, so the last saved value is applied last.
     try:

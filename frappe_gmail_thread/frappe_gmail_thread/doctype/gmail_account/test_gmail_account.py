@@ -244,6 +244,63 @@ class TestGmailAccountBeforeSave(_GmailAccountTestCase):
             account.save(ignore_permissions=True)
         mock_disable.assert_called_once_with(account)
 
+    def _realtime_settings(self, realtime=1):
+        return change_settings(
+            "Google Settings",
+            enable=1,
+            client_id="cid",
+            client_secret="csec",
+            custom_gmail_sync_in_realtime=realtime,
+            custom_gmail_pubsub_topic="topic",
+        )
+
+    def test_reticking_gmail_enabled_starts_watch_again(self):
+        """Unticking Gmail Enabled stops the watch, and ticking it again starts it with the same authorization."""
+        account = _reset_account(gmail_enabled=1, refresh_token="rt")
+        with (
+            self._realtime_settings(),
+            patch(f"{GMAIL_ACCOUNT_MODULE}.disable_pubsub") as mock_disable,
+            patch(f"{GMAIL_ACCOUNT_MODULE}.enable_pubsub") as mock_enable,
+        ):
+            account.gmail_enabled = 0
+            account.save(ignore_permissions=True)
+            mock_disable.assert_called_once()
+            mock_enable.assert_not_called()
+
+            account.gmail_enabled = 1
+            account.save(ignore_permissions=True)
+        mock_enable.assert_called_once_with(account)
+        mock_disable.assert_called_once()
+
+    def test_reticking_gmail_enabled_without_realtime_sync_starts_no_watch(self):
+        """With real-time sync off, ticking Gmail Enabled starts no watch."""
+        account = _reset_account(gmail_enabled=0, refresh_token="rt")
+        account.gmail_enabled = 1
+        with (
+            self._realtime_settings(realtime=0),
+            patch(f"{GMAIL_ACCOUNT_MODULE}.enable_pubsub") as mock_enable,
+        ):
+            account.save(ignore_permissions=True)
+        mock_enable.assert_not_called()
+
+    def test_reticking_gmail_enabled_saves_when_watch_fails(self):
+        """A watch that can't be started is logged; the account is still enabled."""
+        account = _reset_account(gmail_enabled=0, refresh_token="rt")
+        account.gmail_enabled = 1
+        with (
+            self._realtime_settings(),
+            patch(
+                f"{GMAIL_ACCOUNT_MODULE}.enable_pubsub",
+                side_effect=frappe.ValidationError("revoked"),
+            ),
+            patch(f"{GMAIL_ACCOUNT_MODULE}.frappe.log_error") as mock_log,
+        ):
+            account.save(ignore_permissions=True)
+        mock_log.assert_called_once()
+        self.assertEqual(
+            frappe.db.get_value("Gmail Account", account.name, "gmail_enabled"), 1
+        )
+
     def test_saving_enabled_account_does_not_stop_watch(self):
         """Saving an account that stays enabled leaves its Gmail watch alone."""
         account = _reset_account(gmail_enabled=1, refresh_token="rt")
