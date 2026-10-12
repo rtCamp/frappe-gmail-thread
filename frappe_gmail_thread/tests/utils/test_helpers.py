@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import frappe
 from frappe.tests import IntegrationTestCase
+from frappe.utils import get_datetime
 
 from frappe_gmail_thread.tests import (
     TEST_USER,
@@ -255,6 +256,44 @@ class TestCreateNewEmail(IntegrationTestCase):
         refreshed = frappe.get_doc("Gmail Thread", thread.name)
         accounts = [u.account for u in refreshed.involved_users]
         self.assertIn(TEST_USER, accounts)
+
+    def test_adding_linked_user_keeps_thread_modified(self):
+        """Finding an already imported email adds the linked user without moving the thread's modified time."""
+        make_test_user(TEST_USER_2)
+        with as_user(TEST_USER_2):
+            other_account = make_test_gmail_account(linked_user=TEST_USER_2)
+        thread = make_test_gmail_thread(
+            gmail_account=other_account.name,
+            gmail_thread_id="keep-modified-thread",
+            involved_users=[TEST_USER_2],
+            emails=[{"gmail_message_id": "mid-keep-modified"}],
+        )
+        frappe.db.set_value(
+            "Single Email CT",
+            "mid-keep-modified",
+            "email_message_id",
+            "keep-modified@x.com",
+        )
+        last_email_at = get_datetime("2026-01-01 10:00:00")
+        frappe.db.set_value(
+            "Gmail Thread",
+            thread.name,
+            "modified",
+            last_email_at,
+            update_modified=False,
+        )
+        email = _build_email_dict(
+            msg_id="m-keep-modified", message_id="<keep-modified@x.com>"
+        )
+        with self.assertRaises(AlreadyExistsError):
+            create_new_email(email, self.account)
+        involved = frappe.get_all(
+            "Involved User", filters={"parent": thread.name}, pluck="account"
+        )
+        self.assertIn(TEST_USER, involved)
+        self.assertEqual(
+            frappe.db.get_value("Gmail Thread", thread.name, "modified"), last_email_at
+        )
 
 
 class TestProcessAttachments(IntegrationTestCase):

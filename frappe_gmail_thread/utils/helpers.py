@@ -236,7 +236,16 @@ def create_new_email(email, gmail_account):
                     doctype="Involved User", account=gmail_account.linked_user
                 )
                 gmail_thread.append("involved_users", involved_user)
+                # keep `modified` at the latest email's date: no new email was added
+                prev_modified = gmail_thread.modified
                 gmail_thread.save(ignore_permissions=True)
+                frappe.db.set_value(
+                    "Gmail Thread",
+                    gmail_thread.name,
+                    "modified",
+                    prev_modified,
+                    update_modified=False,
+                )
 
             raise AlreadyExistsError
     except frappe.DoesNotExistError:
