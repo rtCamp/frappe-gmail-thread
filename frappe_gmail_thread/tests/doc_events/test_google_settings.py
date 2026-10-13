@@ -35,9 +35,9 @@ def _account(user, *, gmail_enabled, refresh_token):
     return account.name
 
 
-def _settings(*, realtime, changed=True):
+def _settings(*, realtime, changed=("custom_gmail_sync_in_realtime",)):
     gs_doc = MagicMock()
-    gs_doc.has_value_changed.return_value = changed
+    gs_doc.has_value_changed.side_effect = lambda fieldname: fieldname in changed
     gs_doc.custom_gmail_sync_in_realtime = realtime
     return gs_doc
 
@@ -85,7 +85,26 @@ class TestOnUpdate(IntegrationTestCase):
         with patch(
             f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.frappe.enqueue"
         ) as mock_enqueue:
-            on_update(_settings(realtime=1, changed=False))
+            on_update(_settings(realtime=1, changed=()))
+        mock_enqueue.assert_not_called()
+
+    def test_new_topic_or_enabled_api_updates_watches_while_realtime_on(self):
+        """With real-time sync on, a new topic or turning the Google API on also queues the watch update."""
+        for changed in (("custom_gmail_pubsub_topic",), ("enable",)):
+            with patch(
+                f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.frappe.enqueue"
+            ) as mock_enqueue:
+                on_update(_settings(realtime=1, changed=changed))
+            mock_enqueue.assert_called_once()
+
+    def test_new_topic_while_realtime_off_does_nothing(self):
+        """With real-time sync off, changing the topic or the Google API switch queues nothing."""
+        with patch(
+            f"{GOOGLE_SETTINGS_DOC_EVENT_MODULE}.frappe.enqueue"
+        ) as mock_enqueue:
+            on_update(
+                _settings(realtime=0, changed=("custom_gmail_pubsub_topic", "enable"))
+            )
         mock_enqueue.assert_not_called()
 
     def test_realtime_on_starts_watches_of_enabled_authorized_accounts(self):

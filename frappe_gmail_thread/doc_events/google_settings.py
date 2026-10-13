@@ -11,7 +11,14 @@ WATCH_UPDATE_LOCK_TIMEOUT = 20 * 60
 
 
 def on_update(doc: Document, method: str | None = None) -> None:
-    if not doc.has_value_changed("custom_gmail_sync_in_realtime"):
+    # with real-time sync on, watches also follow a new topic or the Google API being enabled
+    if not doc.has_value_changed("custom_gmail_sync_in_realtime") and not (
+        doc.custom_gmail_sync_in_realtime
+        and (
+            doc.has_value_changed("custom_gmail_pubsub_topic")
+            or doc.has_value_changed("enable")
+        )
+    ):
         return
     # a Gmail API round trip per mailbox: keep it out of the settings save
     frappe.enqueue(
