@@ -31,25 +31,32 @@ def on_update(doc: Document, method: str | None = None) -> None:
 def update_gmail_watches() -> None:
     """Start or stop the Gmail watch of every enabled, authorized mailbox to match the real-time sync setting."""
     # Several long workers can pick up these jobs at once. One runs at a time, and it repeats
-    # until the value it applied is still the saved one, so the last saved value is applied last.
+    # until the settings it applied are still the saved ones, so the last save is applied last.
     try:
         with filelock("gmail_thread_update_watches", timeout=WATCH_UPDATE_LOCK_TIMEOUT):
             applied = None
             while True:
                 # new transaction: its snapshot sees saves made while waiting or applying
                 frappe.db.commit()  # nosemgrep
-                realtime = cint(
-                    frappe.db.get_single_value(
-                        "Google Settings", "custom_gmail_sync_in_realtime", cache=False
-                    )
-                )
-                if realtime == applied:
+                watch_settings = get_watch_settings()
+                if watch_settings == applied:
                     return
-                apply_realtime_setting_to_watches(realtime)
-                applied = realtime
+                apply_realtime_setting_to_watches(watch_settings[0])
+                applied = watch_settings
     except LockTimeoutError:
         # the run holding the lock re-reads the setting before it ends and applies this change
         return
+
+
+def get_watch_settings() -> tuple:
+    """The saved Google Settings the watches depend on: real-time sync, and while it is on, the API and topic."""
+
+    def saved(fieldname):
+        return frappe.db.get_single_value("Google Settings", fieldname, cache=False)
+
+    if not cint(saved("custom_gmail_sync_in_realtime")):
+        return (0,)
+    return (1, cint(saved("enable")), saved("custom_gmail_pubsub_topic") or "")
 
 
 def apply_realtime_setting_to_watches(realtime: bool | int) -> None:

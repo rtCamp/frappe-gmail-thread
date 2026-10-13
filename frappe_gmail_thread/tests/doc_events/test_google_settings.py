@@ -215,6 +215,30 @@ class TestOnUpdate(IntegrationTestCase):
         events = self._update_watches(lock=lock, apply=apply)
         self.assertEqual(events, ["commit", "apply 1", "commit", "apply 0", "commit"])
 
+    def test_repeats_for_a_new_topic_saved_meanwhile(self):
+        """A new topic saved while the watches are updated is applied by the same run before it ends."""
+
+        @contextmanager
+        def lock(events):
+            yield
+
+        def apply(realtime):
+            if (
+                frappe.db.get_single_value(
+                    "Google Settings", "custom_gmail_pubsub_topic"
+                )
+                != "new-topic"
+            ):
+                frappe.db.set_single_value(
+                    "Google Settings", "custom_gmail_pubsub_topic", "new-topic"
+                )
+
+        with change_settings(
+            "Google Settings", enable=1, custom_gmail_pubsub_topic="old-topic"
+        ):
+            events = self._update_watches(lock=lock, apply=apply)
+        self.assertEqual(events, ["commit", "apply 1", "commit", "apply 1", "commit"])
+
     def test_run_that_cannot_get_the_lock_ends_quietly(self):
         """A run whose lock wait times out leaves the change to the run holding the lock, without failing."""
 
