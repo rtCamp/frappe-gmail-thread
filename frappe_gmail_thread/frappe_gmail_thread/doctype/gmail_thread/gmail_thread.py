@@ -19,6 +19,7 @@ from frappe_gmail_thread.utils.helpers import (
     add_thread_references,
     create_new_email,
     find_gmail_thread,
+    lock_gmail_thread,
     process_attachments,
     replace_inline_images,
 )
@@ -158,16 +159,6 @@ def get_message_participants(headers):
                 if address:
                     participants.add(address)
     return participants
-
-
-def lock_gmail_thread(name: str) -> Document:
-    """Load the thread with its row locked until the next commit.
-
-    Syncs of different mailboxes update the same thread. A copy read before
-    another sync's commit fails the timestamp check on save, so every update
-    starts from a locked, current copy and commits right after saving.
-    """
-    return frappe.get_doc("Gmail Thread", name, for_update=True)
 
 
 def thread_has_email(gmail_thread: Document, email: Document) -> bool:
@@ -559,9 +550,20 @@ def sync(user=None):
                             docname=docname,
                         )
         except (frappe.QueryDeadlockError, frappe.QueryTimeoutError) as e:
-            # a thread stayed locked by another sync: retry the whole job, which
-            # rolls back, instead of skipping this label's remaining emails
+            # A thread stayed locked by another sync: retry the whole job instead of
+            # skipping this label's remaining emails. The retry starts from the sync
+            # position this run started from, as labels done earlier in the run have
+            # moved it past emails of the labels not reached yet.
             frappe.db.rollback()
+            frappe.db.set_value(
+                "Gmail Account",
+                gmail_account.name,
+                "last_historyid",
+                last_history_id,
+                update_modified=False,
+            )
+            # the job runner rolls back before retrying
+            frappe.db.commit()  # nosemgrep
             raise frappe.RetryBackgroundJobError from e
         except Exception:
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")

@@ -6,6 +6,7 @@ from uuid import uuid4
 import frappe
 from bs4 import BeautifulSoup
 from frappe.email.receive import Email, MaxFileSizeReachedError
+from frappe.model.document import Document
 from frappe.utils import extract_email_id, sanitize_html
 
 
@@ -213,6 +214,22 @@ def add_thread_id_reference(gmail_thread, thread_id) -> bool:
     return True
 
 
+def lock_gmail_thread(name: str) -> Document:
+    """Load the thread with its row locked until the next commit.
+
+    Syncs of different mailboxes update the same thread. A copy read before
+    another sync's commit fails the timestamp check on save, so every update
+    starts from a locked, current copy and commits right after saving.
+    """
+    if not frappe.db.transaction_writes:
+        # Start from a new transaction. With snapshot isolation (MariaDB >= 11.6.2),
+        # locking a row another sync changed after this transaction's first read
+        # fails instead of waiting for it. With writes pending, this sync already
+        # holds the thread it is working on.
+        frappe.db.commit()  # nosemgrep
+    return frappe.get_doc("Gmail Thread", name, for_update=True)
+
+
 class AlreadyExistsError(Exception):
     pass
 
@@ -240,9 +257,7 @@ def create_new_email(email, gmail_account):
         )
         if email_ct:
             # locked, as concurrent syncs of other mailboxes update this thread
-            gmail_thread = frappe.get_doc(
-                "Gmail Thread", email_ct.parent, for_update=True
-            )
+            gmail_thread = lock_gmail_thread(email_ct.parent)
             involved_users_linked = [
                 user.account for user in gmail_thread.involved_users
             ]

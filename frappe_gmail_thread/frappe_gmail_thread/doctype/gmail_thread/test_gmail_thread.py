@@ -655,6 +655,43 @@ class TestSyncConcurrentMailboxes(_GmailThreadTestCase):
             )
         mock_log.assert_not_called()
 
+    def test_retry_starts_from_the_sync_position_of_the_run(self):
+        """A label synced before the lock timeout doesn't move the position the retry starts from."""
+        account = _reset_account_for_sync(
+            last_historyid=100, labels=(("INBOX", True), ("Label_2", True))
+        )
+        frappe.db.commit()  # nosemgrep
+        gmail = MagicMock()
+
+        def history_list(**kwargs):
+            m = MagicMock()
+            messages = (
+                [{"id": "m-label-2", "threadId": self.thread.name}]
+                if kwargs["labelId"] == "Label_2"
+                else []
+            )
+            m.execute.return_value = {
+                "history": [{"messages": messages}],
+                "historyId": "500",
+            }
+            return m
+
+        gmail.users().history().list.side_effect = history_list
+        gmail.users().messages().get.return_value.execute.return_value = {
+            "labelIds": ["Label_2"]
+        }
+        with (
+            patch(
+                f"{GMAIL_THREAD_MODULE}.lock_gmail_thread",
+                side_effect=frappe.QueryTimeoutError("lock wait timeout"),
+            ),
+            self.assertRaises(frappe.RetryBackgroundJobError),
+        ):
+            self._sync(gmail, [_incoming("label-2", "2026-10-12 10:43:16")])
+        self.assertEqual(
+            frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 100
+        )
+
 
 def _email_row(key, date_and_time):
     return {

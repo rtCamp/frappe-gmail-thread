@@ -2,7 +2,7 @@ import base64
 import json
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -22,6 +22,7 @@ from frappe_gmail_thread.utils.helpers import (
     create_new_email,
     find_gmail_thread,
     html_to_text,
+    lock_gmail_thread,
     process_attachments,
     replace_inline_images,
 )
@@ -320,6 +321,36 @@ class TestCreateNewEmail(IntegrationTestCase):
         self.assertEqual(
             find_gmail_thread("known-user-other-thread-id").name, thread.name
         )
+
+
+class TestLockGmailThread(IntegrationTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        make_test_user(TEST_USER)
+        with as_user(TEST_USER):
+            cls.account = make_test_gmail_account(linked_user=TEST_USER)
+
+    def _lock(self, pending_writes):
+        thread = make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id=f"lock-{frappe.generate_hash(length=8)}",
+        )
+        with (
+            patch.object(frappe.db, "transaction_writes", pending_writes),
+            patch.object(frappe.db, "commit") as mock_commit,
+        ):
+            locked = lock_gmail_thread(thread.name)
+        self.assertEqual(locked.name, thread.name)
+        return mock_commit
+
+    def test_locks_from_a_new_transaction_when_nothing_is_pending(self):
+        """With nothing to keep, the lock is taken in a new transaction, so no older snapshot can conflict with it."""
+        self._lock(pending_writes=0).assert_called_once()
+
+    def test_keeps_pending_writes_in_the_transaction(self):
+        """Pending writes aren't committed early by taking the lock."""
+        self._lock(pending_writes=3).assert_not_called()
 
 
 class TestProcessAttachments(IntegrationTestCase):
