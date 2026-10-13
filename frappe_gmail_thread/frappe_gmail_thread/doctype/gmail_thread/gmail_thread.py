@@ -120,7 +120,9 @@ def sync_labels(account_name: str | Document, should_save: bool = True):
 
     gmail_label_ids = {label["id"] for label in labels["labels"]}
     deleted = [x for x in gmail_account.labels if x.label_id not in gmail_label_ids]
-    if deleted:
+    # Only when the account is saved here: inside the account's own save (a new
+    # authorization), removing rows would count as a label change and reset the sync.
+    if deleted and should_save:
         # labels deleted in Gmail. Delete the rows directly too, so saving the
         # account below doesn't see a label change and reset the sync
         frappe.db.delete(
@@ -398,6 +400,8 @@ def sync(user=None):
                             "Gmail Label",
                             {"parent": gmail_account.name, "label_id": label_id},
                         )
+                        # release the rows now: saving the account locks its labels
+                        frappe.db.commit()  # nosemgrep
                         continue
                     # The label exists, so startHistoryId is too old. The error
                     # carries no newer history id: reset to 0 for an initial sync

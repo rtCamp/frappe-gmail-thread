@@ -291,6 +291,27 @@ class TestSyncLabels(_GmailThreadTestCase):
             frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 100
         )
 
+    def test_reauthorizing_keeps_sync_position_when_a_label_was_deleted(self):
+        """A new authorization doesn't reset the sync because a label was deleted in Gmail."""
+        account = _reset_account_for_sync(
+            last_historyid=100,
+            labels=(("INBOX", True), ("Label_gone", False)),
+        )
+        account.refresh_token = "new-token"
+        gmail = self._gmail_with_labels([{"id": "INBOX", "name": "INBOX"}])
+        with change_settings(
+            "Google Settings",
+            enable=1,
+            client_id="cid",
+            client_secret="csec",
+            custom_gmail_sync_in_realtime=0,
+        ):
+            with patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail):
+                account.save(ignore_permissions=True)
+        self.assertEqual(
+            frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 100
+        )
+
     def test_does_not_save_when_should_save_false(self):
         """When should_save=False the account's save() is not invoked."""
         account = frappe.get_doc("Gmail Account", self.account.name)
@@ -571,6 +592,36 @@ class TestSyncErrorHandling(_GmailThreadTestCase):
         # INBOX was still synced and the sync position moved forward, not back to 0
         self.assertEqual(
             frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 500
+        )
+
+    def test_dropped_label_is_committed_before_the_next_label_syncs(self):
+        """The dropped label row is committed right away, so the account's labels aren't locked while other labels sync."""
+        _reset_account_for_sync(
+            last_historyid=100,
+            labels=(("Label_deleted", True), ("INBOX", True)),
+        )
+        gmail = self._gmail_with_history(deleted_labels=("Label_deleted",))
+        events = []
+        history_list = gmail.users().history().list.side_effect
+
+        def recording_history_list(**kwargs):
+            events.append(f"history {kwargs['labelId']}")
+            return history_list(**kwargs)
+
+        gmail.users().history().list.side_effect = recording_history_list
+        with as_user("Administrator"):
+            with (
+                change_settings(
+                    "Google Settings", enable=1, client_id="cid", client_secret="csec"
+                ),
+                patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail),
+                patch.object(
+                    frappe.db, "commit", side_effect=lambda: events.append("commit")
+                ),
+            ):
+                sync(user=TEST_USER)
+        self.assertEqual(
+            events[:3], ["history Label_deleted", "commit", "history INBOX"]
         )
 
     def test_expired_history_still_resets_sync(self):
