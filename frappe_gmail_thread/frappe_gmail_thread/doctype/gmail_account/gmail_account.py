@@ -23,7 +23,9 @@ class GmailAccount(Document):
         self.linked_user = frappe.session.user
         self.email_id = frappe.get_value("User", self.linked_user, "email")
 
-    def on_trash(self):
+    def after_delete(self):
+        # not on_trash: it runs before the link check, so a delete refused because
+        # synced threads link to the account would already have stopped its watch
         disable_pubsub(self)
 
     def start_watch(self) -> None:

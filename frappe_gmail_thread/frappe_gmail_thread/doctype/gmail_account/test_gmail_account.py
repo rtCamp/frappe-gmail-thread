@@ -11,6 +11,7 @@ from frappe_gmail_thread.tests import (
     TEST_USER,
     as_user,
     make_test_gmail_account,
+    make_test_gmail_thread,
     make_test_user,
     set_password_field,
 )
@@ -129,7 +130,7 @@ class TestGmailAccountValidate(_GmailAccountTestCase):
             account.validate()  # no exception expected
 
 
-class TestGmailAccountOnTrash(_GmailAccountTestCase):
+class TestGmailAccountAfterDelete(_GmailAccountTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -145,7 +146,7 @@ class TestGmailAccountOnTrash(_GmailAccountTestCase):
             custom_gmail_pubsub_topic="topic",
         ):
             with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
-                account.on_trash()
+                account.after_delete()
         gmail.users().stop.assert_called_once_with(userId="me")
 
     def test_stops_watch_of_disabled_account(self):
@@ -154,14 +155,14 @@ class TestGmailAccountOnTrash(_GmailAccountTestCase):
         gmail = MagicMock()
         with change_settings("Google Settings", custom_gmail_pubsub_topic=""):
             with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
-                account.on_trash()
+                account.after_delete()
         gmail.users().stop.assert_called_once_with(userId="me")
 
     def test_no_api_call_without_refresh_token(self):
         """Deleting an account that was never authorized makes no Gmail API call."""
         account = _reset_account(gmail_enabled=1, refresh_token=None)
         with patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get:
-            account.on_trash()
+            account.after_delete()
         mock_get.assert_not_called()
 
     def test_delete_succeeds_when_stop_fails(self):
@@ -173,8 +174,36 @@ class TestGmailAccountOnTrash(_GmailAccountTestCase):
             ),
             patch(f"{OAUTH_MODULE}.frappe.log_error") as mock_log,
         ):
-            account.on_trash()
+            account.after_delete()
         mock_log.assert_called_once()
+
+    def test_refused_delete_keeps_watch(self):
+        """A delete refused because synced threads link to the account leaves its watch running."""
+        account = _reset_account(gmail_enabled=1, refresh_token="rt")
+        make_test_gmail_thread(
+            gmail_account=account.name,
+            gmail_thread_id=f"delete-link-{frappe.generate_hash(length=8)}",
+        )
+        gmail = MagicMock()
+        with (
+            patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail),
+            self.assertRaises(frappe.LinkExistsError),
+        ):
+            frappe.delete_doc("Gmail Account", account.name)
+        gmail.users().stop.assert_not_called()
+
+    def test_delete_stops_watch(self):
+        """Deleting an account without synced threads stops its watch."""
+        user = "test_fgt_delete_watch@example.com"
+        make_test_user(user)
+        with as_user(user):
+            account = make_test_gmail_account(linked_user=user)
+        set_password_field("Gmail Account", account.name, "refresh_token", "rt")
+        gmail = MagicMock()
+        with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
+            frappe.delete_doc("Gmail Account", account.name)
+        gmail.users().stop.assert_called_once_with(userId="me")
+        self.assertFalse(frappe.db.exists("Gmail Account", account.name))
 
 
 class TestGmailAccountBeforeSave(_GmailAccountTestCase):
