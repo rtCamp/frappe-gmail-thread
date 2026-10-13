@@ -11,10 +11,12 @@ from frappe.tests import IntegrationTestCase, change_settings
 
 from frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread import (
     GMAIL_API_RETRIES,
+    MAX_FETCH_ATTEMPTS,
     get_max_threads_per_label,
     get_permission_query_conditions,
     get_retry_after,
     has_permission,
+    is_rate_limit_error,
     list_label_threads,
     sync,
     sync_labels,
@@ -31,7 +33,11 @@ from frappe_gmail_thread.tests import (
     set_password_field,
 )
 from frappe_gmail_thread.utils.helpers import AlreadyExistsError
-from frappe_gmail_thread.utils.sync_pause import is_sync_paused, pause_sync
+from frappe_gmail_thread.utils.sync_pause import (
+    count_fetch_failure,
+    is_sync_paused,
+    pause_sync,
+)
 
 GMAIL_THREAD_MODULE = (
     "frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread"
@@ -484,9 +490,11 @@ def _throttled(status=429, reason="rateLimitExceeded", retry_after=None):
 class TestSyncRateLimits(_GmailThreadTestCase):
     def setUp(self):
         frappe.cache.delete_value(f"gmail_thread_sync_paused:{TEST_USER}")
+        frappe.cache.delete_keys("gmail_thread_fetch_failures:")
         self.addCleanup(
             frappe.cache.delete_value, f"gmail_thread_sync_paused:{TEST_USER}"
         )
+        self.addCleanup(frappe.cache.delete_keys, "gmail_thread_fetch_failures:")
 
     def _incremental_gmail(self, labels_history):
         """history().list returns or raises per label, as given in `labels_history`."""
@@ -665,13 +673,126 @@ class TestSyncRateLimits(_GmailThreadTestCase):
         self.assertEqual(self._last_historyid(account), 500)
         self.assertFalse(is_sync_paused(TEST_USER))
 
-    def test_other_message_error_is_logged(self):
-        """Any other error fetching a message is logged for its label instead of being ignored."""
-        _, mock_log = self._sync_message_error(
+    def test_message_gmail_refuses_is_logged_and_skipped(self):
+        """A message Gmail refuses (an error a retry won't fix) is logged and skipped, so the label still finishes."""
+        account, mock_log = self._sync_message_error(
             _throttled(status=400, reason="invalidArgument")
         )
         mock_log.assert_called_once()
         self.assertFalse(is_sync_paused(TEST_USER))
+        self.assertEqual(self._last_historyid(account), 500)
+
+    def test_message_failing_on_every_attempt_is_skipped_after_the_limit(self):
+        """A message Gmail fails to return on every run is logged and skipped after the last attempt, so the mailbox doesn't stall."""
+        with patch(
+            f"{GMAIL_THREAD_MODULE}.count_fetch_failure",
+            return_value=MAX_FETCH_ATTEMPTS,
+        ):
+            account, mock_log = self._sync_message_error(
+                _throttled(status=503, reason="backendError")
+            )
+        mock_log.assert_called_once()
+        self.assertFalse(is_sync_paused(TEST_USER))
+        self.assertEqual(self._last_historyid(account), 500)
+
+    def test_failed_fetches_are_counted_per_item(self):
+        """Each failed fetch of a thread or message adds to that item's own count."""
+        self.assertEqual(count_fetch_failure(TEST_USER, "message m-a"), 1)
+        self.assertEqual(count_fetch_failure(TEST_USER, "message m-a"), 2)
+        self.assertEqual(count_fetch_failure(TEST_USER, "message m-b"), 1)
+
+    def _initial_gmail_with_thread_error(self, error):
+        gmail = MagicMock()
+        gmail.users().threads().list.return_value.execute.return_value = {
+            "threads": [{"id": "t-unavailable"}]
+        }
+        gmail.users().threads().get.return_value.execute.side_effect = error
+        return gmail
+
+    def test_thread_deleted_since_listed_is_skipped(self):
+        """A thread deleted after the label was listed (404) is skipped quietly in the initial import."""
+        _reset_account_for_sync(last_historyid=0)
+        mock_log = self._sync(
+            self._initial_gmail_with_thread_error(
+                _throttled(status=404, reason="notFound")
+            )
+        )
+        mock_log.assert_not_called()
+        self.assertFalse(is_sync_paused(TEST_USER))
+
+    def test_thread_server_error_pauses_the_initial_import(self):
+        """A thread Gmail fails to return (5xx) stops the initial import to try again later."""
+        account = _reset_account_for_sync(last_historyid=0)
+        mock_log = self._sync(
+            self._initial_gmail_with_thread_error(
+                _throttled(status=503, reason="backendError")
+            )
+        )
+        mock_log.assert_not_called()
+        self.assertTrue(is_sync_paused(TEST_USER))
+        self.assertEqual(self._last_historyid(account), 0)
+
+    def test_rate_limit_reasons_are_read_from_errors_and_details(self):
+        """A 403 counts as a rate limit by the reasons in either list of Google's error body."""
+
+        def forbidden(error_body):
+            return googleapiclient.errors.HttpError(
+                resp=httplib2.Response({"status": 403}),
+                content=json.dumps({"error": {"code": 403, **error_body}}).encode(),
+            )
+
+        error_info = {
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "reason": "RATE_LIMIT_EXCEEDED",
+        }
+        self.assertTrue(
+            is_rate_limit_error(
+                forbidden(
+                    {
+                        "errors": [{"reason": "userRateLimitExceeded"}],
+                        "details": [error_info],
+                    }
+                )
+            )
+        )
+        self.assertTrue(is_rate_limit_error(forbidden({"details": [error_info]})))
+        self.assertFalse(
+            is_rate_limit_error(forbidden({"errors": [{"reason": "forbidden"}]}))
+        )
+
+    def test_incremental_sync_reads_every_history_page(self):
+        """Every page of a label's history is read, and the position comes from the last page."""
+        account = _reset_account_for_sync(last_historyid=100)
+        gmail = MagicMock()
+        pages = {
+            None: {
+                "history": [{"messages": [{"id": "m-page-1", "threadId": "t-p"}]}],
+                "nextPageToken": "page-2",
+                "historyId": "500",
+            },
+            "page-2": {
+                "history": [{"messages": [{"id": "m-page-2", "threadId": "t-p"}]}],
+                "historyId": "500",
+            },
+        }
+
+        def history_list(**kwargs):
+            m = MagicMock()
+            m.execute.return_value = pages[kwargs["pageToken"]]
+            return m
+
+        gmail.users().history().list.side_effect = history_list
+        gmail.users().messages().get.return_value.execute.return_value = {
+            "labelIds": ["DRAFT"]
+        }
+        self._sync(gmail)
+        fetched = [
+            c.kwargs["id"]
+            for c in gmail.users().messages().get.call_args_list
+            if c.kwargs
+        ]
+        self.assertEqual(fetched, ["m-page-1", "m-page-2"])
+        self.assertEqual(self._last_historyid(account), 500)
 
     def test_paused_mailbox_is_not_synced(self):
         """While a mailbox is paused, its sync job returns without calling Gmail."""

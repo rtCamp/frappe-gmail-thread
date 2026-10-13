@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 
+import json
 from datetime import datetime, timezone
 from email.utils import getaddresses, parsedate_to_datetime
 
@@ -24,6 +25,7 @@ from frappe_gmail_thread.utils.helpers import (
 )
 from frappe_gmail_thread.utils.sync_pause import (
     DEFAULT_PAUSE_SECONDS,
+    count_fetch_failure,
     is_sync_paused,
     pause_sync,
 )
@@ -36,7 +38,10 @@ RATE_LIMIT_REASONS = {
     "rateLimitExceeded",
     "userRateLimitExceeded",
     "dailyLimitExceeded",
+    "RATE_LIMIT_EXCEEDED",
 }
+# failed fetches of one message (a server error each time) before it is skipped
+MAX_FETCH_ATTEMPTS = 5
 
 
 class GmailThread(Document):
@@ -152,11 +157,52 @@ def is_rate_limit_error(error: Exception) -> bool:
         return False
     if error.status_code == 429:
         return True
-    details = error.error_details if isinstance(error.error_details, list) else []
-    return error.status_code == 403 and any(
-        isinstance(detail, dict) and detail.get("reason") in RATE_LIMIT_REASONS
-        for detail in details
+    return error.status_code == 403 and bool(
+        get_error_reasons(error) & RATE_LIMIT_REASONS
     )
+
+
+def get_error_reasons(error: googleapiclient.errors.HttpError) -> set[str]:
+    """The reasons in Google's error body, from both its `errors` and `details` lists."""
+    try:
+        body = json.loads(error.content)
+    except (TypeError, ValueError):
+        return set()
+    error_body = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error_body, dict):
+        return set()
+    return {
+        item["reason"]
+        for key in ("errors", "details")
+        for item in error_body.get(key) or []
+        if isinstance(item, dict) and item.get("reason")
+    }
+
+
+def skip_unavailable(
+    error: googleapiclient.errors.HttpError, user: str, item_id: str
+) -> bool:
+    """Whether to skip a thread or message Gmail didn't return, rather than stop the run.
+
+    One deleted since it was listed (404) is skipped. A rate limit stops the run, and so
+    does a server error until the same item has failed MAX_FETCH_ATTEMPTS times. Other
+    errors won't go away on a retry. A skipped item is logged, except a deleted one, so a
+    single item can't hold up the mailbox.
+    """
+    if error.status_code == 404:
+        return True
+    if is_rate_limit_error(error):
+        return False
+    if (
+        error.status_code >= 500
+        and count_fetch_failure(user, item_id) < MAX_FETCH_ATTEMPTS
+    ):
+        return False
+    frappe.log_error(
+        title="Gmail Thread: skipped what Gmail didn't return",
+        message=f"{user}: {item_id}\n\n{frappe.get_traceback()}",
+    )
+    return True
 
 
 def is_temporary_error(error: Exception) -> bool:
@@ -215,6 +261,30 @@ def list_label_threads(gmail, label_id: str, limit: int) -> list[dict]:
         if not page_token:
             break
     return threads[:limit]
+
+
+def list_label_history(gmail, label_id: str, start_history_id: int) -> dict:
+    """The label's history since `start_history_id` across result pages, with the mailbox's history id."""
+    history = []
+    page_token = None
+    while True:
+        response = (
+            gmail.users()
+            .history()
+            .list(
+                userId="me",
+                startHistoryId=start_history_id,
+                historyTypes=["messageAdded", "labelAdded"],
+                labelId=label_id,
+                maxResults=500,
+                pageToken=page_token,
+            )
+            .execute(num_retries=GMAIL_API_RETRIES)
+        )
+        history.extend(response.get("history", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            return {"history": history, "historyId": response.get("historyId")}
 
 
 def get_message_headers(message):
@@ -289,12 +359,17 @@ def sync(user=None):
                     continue
                 for thread in threads[::-1]:
                     thread_id = thread["id"]
-                    thread_data = (
-                        gmail.users()
-                        .threads()
-                        .get(userId="me", id=thread_id)
-                        .execute(num_retries=GMAIL_API_RETRIES)
-                    )
+                    try:
+                        thread_data = (
+                            gmail.users()
+                            .threads()
+                            .get(userId="me", id=thread_id)
+                            .execute(num_retries=GMAIL_API_RETRIES)
+                        )
+                    except googleapiclient.errors.HttpError as e:
+                        if not skip_unavailable(e, user, f"thread {thread_id}"):
+                            raise
+                        continue
                     gmail_thread = find_gmail_thread(thread_id)
                     involved_users = set()
                     email = None
@@ -334,9 +409,9 @@ def sync(user=None):
                                 .execute(num_retries=GMAIL_API_RETRIES)
                             )
                         except googleapiclient.errors.HttpError as e:
-                            # skip a message deleted since it was listed; any other
-                            # error ends the label, so the message isn't skipped for good
-                            if e.status_code != 404:
+                            if not skip_unavailable(
+                                e, user, f"message {message['id']}"
+                            ):
                                 raise
                             continue
                         if "DRAFT" in raw_email.get("labelIds", []):
@@ -428,17 +503,7 @@ def sync(user=None):
             else:
                 # Incremental sync using history API
                 try:
-                    history = (
-                        gmail.users()
-                        .history()
-                        .list(
-                            userId="me",
-                            startHistoryId=last_history_id,
-                            historyTypes=["messageAdded", "labelAdded"],
-                            labelId=label_id,
-                        )
-                        .execute(num_retries=GMAIL_API_RETRIES)
-                    )
+                    history = list_label_history(gmail, label_id, last_history_id)
                 except googleapiclient.errors.HttpError as e:
                     # If notFound, update historyid to the value returned by API (if any)
                     # You won't find history id in error, so just reset to 0 and let next sync do initial sync
@@ -451,7 +516,7 @@ def sync(user=None):
                                 return
                     raise e
 
-                new_history_id = int(history.get("historyId", last_history_id))
+                new_history_id = int(history["historyId"] or last_history_id)
                 if new_history_id > max_history_id:
                     max_history_id = new_history_id
                 updated_docs = set()
@@ -466,9 +531,9 @@ def sync(user=None):
                                     .execute(num_retries=GMAIL_API_RETRIES)
                                 )
                             except googleapiclient.errors.HttpError as e:
-                                # skip a message deleted since it was listed; any other
-                                # error ends the label, so the message isn't skipped for good
-                                if e.status_code != 404:
+                                if not skip_unavailable(
+                                    e, user, f"message {message['id']}"
+                                ):
                                     raise
                                 continue
                             if "DRAFT" in raw_email.get("labelIds", []):
