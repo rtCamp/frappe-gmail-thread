@@ -31,7 +31,8 @@ from frappe_gmail_thread.utils.sync_pause import (
 )
 
 SCOPES = "https://www.googleapis.com/auth/gmail.readonly"
-# retried with exponential backoff by the client on 429, 5xx and rate-limit 403s
+# retried with exponential backoff by the client on 429, 5xx and 403 userRateLimitExceeded
+# or rateLimitExceeded; other rate limits (e.g. dailyLimitExceeded) pause the mailbox at once
 GMAIL_API_RETRIES = 3
 DEFAULT_MAX_THREADS_PER_LABEL = 100
 RATE_LIMIT_REASONS = {
