@@ -215,6 +215,17 @@ def is_temporary_error(error: Exception) -> bool:
     )
 
 
+def pause_on_temporary_error(error: Exception, user: str) -> bool:
+    """Pause the mailbox's sync when Gmail can't serve it right now; False for any other error."""
+    if not is_temporary_error(error):
+        return False
+    pause_sync(user, get_retry_after(error))
+    frappe.logger("frappe_gmail_thread").warning(
+        f"Gmail sync of {user} paused after HTTP {error.status_code}"
+    )
+    return True
+
+
 def get_retry_after(error: googleapiclient.errors.HttpError) -> int:
     """Seconds to wait as asked by Google's Retry-After header, else a default."""
     value = str((error.resp or {}).get("retry-after") or "").strip()
@@ -341,14 +352,27 @@ def sync(user=None):
         frappe.throw(
             _("Please authorize Gmail by clicking on 'Authorize Gmail' button.")
         )
-    gmail = get_gmail_object(gmail_account)
-    label_ids = [x.label_id for x in gmail_account.labels if x.enabled]
-    if not label_ids:
+    last_history_id = int(gmail_account.last_historyid or 0)
+    try:
+        gmail = get_gmail_object(gmail_account)
+        label_ids = [x.label_id for x in gmail_account.labels if x.enabled]
+        if not label_ids:
+            return
+        # Before an initial import, the mailbox's current history id: mail arriving from
+        # now on is in the history after it, so the next run continues incrementally even
+        # if this import brings nothing (an empty label, or threads Gmail won't return).
+        start_history_id = last_history_id or int(
+            gmail.users()
+            .getProfile(userId="me")
+            .execute(num_retries=GMAIL_API_RETRIES)["historyId"]
+        )
+    except googleapiclient.errors.HttpError as e:
+        if not pause_on_temporary_error(e, user):
+            raise
         return
 
     # Always store the maximum history id seen, to avoid skipping emails
-    last_history_id = int(gmail_account.last_historyid or 0)
-    max_history_id = last_history_id
+    max_history_id = start_history_id
     max_threads = get_max_threads_per_label()
 
     for label_id in label_ids:
@@ -356,8 +380,6 @@ def sync(user=None):
             if not last_history_id:
                 # Initial sync: fetch all threads for the label
                 threads = list_label_threads(gmail, label_id, max_threads)
-                if not threads:
-                    continue
                 for thread in threads[::-1]:
                     thread_id = thread["id"]
                     try:
@@ -633,20 +655,15 @@ def sync(user=None):
                             docname=docname,
                         )
         except Exception as e:
-            if is_temporary_error(e):
-                # Stop here and wait it out. Go back to the sync position
-                # this run started from, as labels already done may have moved it
-                # past emails of the labels not reached yet.
-                pause_sync(user, get_retry_after(e))
+            if pause_on_temporary_error(e, user):
+                # Go back to the sync position this run started from, as labels
+                # already done may have moved it past emails of the labels not reached yet.
                 frappe.db.set_value(
                     "Gmail Account",
                     gmail_account.name,
                     "last_historyid",
                     last_history_id,
                     update_modified=False,
-                )
-                frappe.logger("frappe_gmail_thread").warning(
-                    f"Gmail sync of {user} paused after HTTP {e.status_code}"
                 )
                 return
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")

@@ -732,6 +732,36 @@ class TestSyncRateLimits(_GmailThreadTestCase):
         self.assertTrue(is_sync_paused(TEST_USER))
         self.assertEqual(self._last_historyid(account), 0)
 
+    def test_initial_import_that_brings_nothing_hands_over_to_incremental_sync(self):
+        """An initial import starts from the mailbox's current history id, so the next run is incremental even if nothing was imported."""
+        account = _reset_account_for_sync(last_historyid=0)
+        gmail = MagicMock()
+        gmail.users().getProfile.return_value.execute.return_value = {
+            "historyId": "777"
+        }
+        gmail.users().threads().list.return_value.execute.return_value = {}
+        self._sync(gmail)
+        self.assertEqual(self._last_historyid(account), 777)
+
+    def test_throttled_profile_check_pauses_the_mailbox(self):
+        """A rate limit or server error from Gmail before any label is synced pauses the mailbox instead of failing the job."""
+        account = _reset_account_for_sync(last_historyid=100)
+        with as_user("Administrator"):
+            with (
+                change_settings(
+                    "Google Settings", enable=1, client_id="cid", client_secret="csec"
+                ),
+                patch(
+                    f"{GMAIL_THREAD_MODULE}.get_gmail_object",
+                    side_effect=_throttled(status=503, reason="backendError"),
+                ),
+                patch(f"{GMAIL_THREAD_MODULE}.frappe.log_error") as mock_log,
+            ):
+                sync(user=TEST_USER)
+        mock_log.assert_not_called()
+        self.assertTrue(is_sync_paused(TEST_USER))
+        self.assertEqual(self._last_historyid(account), 100)
+
     def test_rate_limit_reasons_are_read_from_errors_and_details(self):
         """A 403 counts as a rate limit by the reasons in either list of Google's error body."""
 
