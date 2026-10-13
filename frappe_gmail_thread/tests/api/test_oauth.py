@@ -216,6 +216,7 @@ class TestHandleExpiredAuthorization(IntegrationTestCase):
         account = _reset_account_with_labels(refresh_token="rt")
         alerts_before = self._alerts(account.name)
         frappe.db.set_value("User", TEST_USER, "email", "test_fgt_renamed@example.com")
+        self.addCleanup(frappe.db.set_value, "User", TEST_USER, "email", TEST_USER)
 
         handle_expired_authorization(account)
 
