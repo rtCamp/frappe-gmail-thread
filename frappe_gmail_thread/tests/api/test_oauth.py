@@ -211,6 +211,16 @@ class TestHandleExpiredAuthorization(IntegrationTestCase):
         self.assertIsNone(self._token(account.name))
         self.assertEqual(self._alerts(account.name), alerts_before + 1)
 
+    def test_alerts_owner_whose_email_differs_from_user_name(self):
+        """The alert reaches the owner even when their email is no longer their user name."""
+        account = _reset_account_with_labels(refresh_token="rt")
+        alerts_before = self._alerts(account.name)
+        frappe.db.set_value("User", TEST_USER, "email", "test_fgt_renamed@example.com")
+
+        handle_expired_authorization(account)
+
+        self.assertEqual(self._alerts(account.name), alerts_before + 1)
+
     def test_keeps_token_issued_after_the_account_was_loaded(self):
         """A job holding the account from before a re-authorization neither clears the new token nor alerts."""
         stale = _reset_account_with_labels(refresh_token="rt")

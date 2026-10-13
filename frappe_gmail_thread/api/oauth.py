@@ -326,8 +326,9 @@ def handle_expired_authorization(gmail_account: Document) -> None:
     frappe.logger("frappe_gmail_thread").info(
         f"Gmail authorization expired for {gmail_account.name}, refresh token cleared"
     )
+    # notifications are addressed by email, which can differ from the user's name
     enqueue_create_notification(
-        gmail_account.linked_user,
+        frappe.db.get_value("User", gmail_account.linked_user, "email"),
         {
             "type": "Alert",
             "document_type": "Gmail Account",
