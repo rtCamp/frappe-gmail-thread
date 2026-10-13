@@ -183,7 +183,9 @@ def disable_pubsub(gmail_account: Document) -> bool:
     Gmail Enabled or real-time sync. Failures are logged, not raised, so a
     mailbox with revoked access can still be disabled or deleted.
     """
-    if not gmail_account.refresh_token:
+    # Frappe 15 deletes the stored token before any delete hook runs: with nothing to
+    # call Gmail with, the watch expires within 7 days and its pushes are ignored
+    if not gmail_account.get_password("refresh_token", raise_exception=False):
         return False
     try:
         gmail = get_gmail_object(gmail_account)

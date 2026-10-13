@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, change_settings
+from frappe.utils.password import remove_encrypted_password
 
 from frappe_gmail_thread.api.oauth import (
     authorize_access,
@@ -351,3 +352,18 @@ class TestDisablePubsub(IntegrationTestCase):
             with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
                 disable_pubsub(account)
         gmail.users().stop.assert_called_once_with(userId="me")
+
+    def test_no_api_call_once_the_stored_token_is_gone(self):
+        """When the stored token is already deleted (Frappe 15 deletes it before delete hooks), nothing is called or logged."""
+        account = _reset_account_with_labels(gmail_enabled=1, refresh_token="rt")
+        # as stored: a mask in the column, the token itself gone
+        frappe.db.set_value("Gmail Account", account.name, "refresh_token", "*" * 8)
+        remove_encrypted_password("Gmail Account", account.name, "refresh_token")
+        account.reload()
+        with (
+            patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get,
+            patch(f"{OAUTH_MODULE}.frappe.log_error") as mock_log,
+        ):
+            self.assertFalse(disable_pubsub(account))
+        mock_get.assert_not_called()
+        mock_log.assert_not_called()
