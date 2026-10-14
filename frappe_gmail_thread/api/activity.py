@@ -3,7 +3,7 @@ import frappe.utils
 from frappe import _
 
 
-def get_attachments_data(email):
+def _parse_attachments(email) -> list:
     raw_attachments = getattr(email, "attachments_data", None)
     if not raw_attachments:
         return []
@@ -24,22 +24,34 @@ def get_attachments_data(email):
 
     if not attachments_data or not isinstance(attachments_data, list):
         return []
+    return attachments_data
 
-    file_doc_names = {
+
+def _file_doc_names(attachments_data) -> set:
+    return {
         a.get("file_doc_name")
         for a in attachments_data
         if isinstance(a, dict) and a.get("file_doc_name")
     }
-    file_url_by_name: dict[str, str] = {}
-    if file_doc_names:
-        file_url_by_name = {
-            r["name"]: r["file_url"]
-            for r in frappe.get_list(
-                "File",
-                filters={"name": ("in", list(file_doc_names))},
-                fields=["name", "file_url"],
-            )
-        }
+
+
+def get_file_urls(file_doc_names) -> dict[str, str]:
+    if not file_doc_names:
+        return {}
+    return {
+        r["name"]: r["file_url"]
+        for r in frappe.get_list(
+            "File",
+            filters={"name": ("in", list(file_doc_names))},
+            fields=["name", "file_url"],
+        )
+    }
+
+
+def get_attachments_data(email, file_url_by_name: dict[str, str] | None = None):
+    attachments_data = _parse_attachments(email)
+    if file_url_by_name is None:
+        file_url_by_name = get_file_urls(_file_doc_names(attachments_data))
 
     valid: list[dict] = []
     for attachment in attachments_data:
@@ -65,9 +77,22 @@ def get_linked_gmail_threads(doctype: str, docname: str | int):
             "reference_name": docname,
         },
     )
+    threads = [
+        frappe.get_doc("Gmail Thread", t.name, check_permission="read")
+        for t in gmail_threads
+    ]
+    # one permission-filtered File query per timeline: File's permission
+    # query rebuilds the user's perms on every call, so per email it is slow
+    file_url_by_name = get_file_urls(
+        {
+            n
+            for t in threads
+            for e in t.emails
+            for n in _file_doc_names(_parse_attachments(e))
+        }
+    )
     data = []
-    for thread in gmail_threads:
-        thread = frappe.get_doc("Gmail Thread", thread.name, check_permission="read")
+    for thread in threads:
         for email in thread.emails:
             t_data = {
                 "icon": "mail",
@@ -101,7 +126,7 @@ def get_linked_gmail_threads(doctype: str, docname: str | int):
                         "read_by_recipient": email.read_by_recipient,
                         "rating": 0,  # TODO: add rating
                         "recipients": email.recipients,
-                        "attachments": get_attachments_data(email),
+                        "attachments": get_attachments_data(email, file_url_by_name),
                         "_url": thread.get_url(),
                         "_doc_status": (
                             "Sent" if email.sent_or_received == "Sent" else "Received"

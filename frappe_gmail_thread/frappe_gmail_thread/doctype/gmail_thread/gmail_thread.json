@@ -40,7 +40,8 @@
    "fieldtype": "Dynamic Link",
    "label": "Reference Name",
    "mandatory_depends_on": "reference_doctype",
-   "options": "reference_doctype"
+   "options": "reference_doctype",
+   "search_index": 1
   },
   {
    "fieldname": "reference_owner",
@@ -117,7 +118,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2024-12-24 20:06:51.533156",
+ "modified": "2026-10-14 08:54:13.605391",
  "modified_by": "Administrator",
  "module": "Frappe Gmail Thread",
  "name": "Gmail Thread",

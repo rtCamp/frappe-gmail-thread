@@ -14,13 +14,14 @@
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Account",
-   "options": "User"
+   "options": "User",
+   "search_index": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2024-12-17 02:57:06.303793",
+ "modified": "2026-10-14 08:54:13.605391",
  "modified_by": "Administrator",
  "module": "Frappe Gmail Thread",
  "name": "Involved User",
