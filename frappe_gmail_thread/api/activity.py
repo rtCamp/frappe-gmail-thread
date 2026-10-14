@@ -35,7 +35,7 @@ def _file_doc_names(attachments_data) -> set:
     }
 
 
-def get_file_urls(file_doc_names) -> dict[str, str]:
+def _get_file_urls(file_doc_names) -> dict[str, str]:
     if not file_doc_names:
         return {}
     return {
@@ -48,10 +48,15 @@ def get_file_urls(file_doc_names) -> dict[str, str]:
     }
 
 
-def get_attachments_data(email, file_url_by_name: dict[str, str] | None = None):
-    attachments_data = _parse_attachments(email)
+def get_attachments_data(
+    email,
+    file_url_by_name: dict[str, str] | None = None,
+    attachments_data: list | None = None,
+):
+    if attachments_data is None:
+        attachments_data = _parse_attachments(email)
     if file_url_by_name is None:
-        file_url_by_name = get_file_urls(_file_doc_names(attachments_data))
+        file_url_by_name = _get_file_urls(_file_doc_names(attachments_data))
 
     valid: list[dict] = []
     for attachment in attachments_data:
@@ -81,15 +86,11 @@ def get_linked_gmail_threads(doctype: str, docname: str | int):
         frappe.get_doc("Gmail Thread", t.name, check_permission="read")
         for t in gmail_threads
     ]
+    attachments = {e.name: _parse_attachments(e) for t in threads for e in t.emails}
     # one permission-filtered File query per timeline: File's permission
     # query rebuilds the user's perms on every call, so per email it is slow
-    file_url_by_name = get_file_urls(
-        {
-            n
-            for t in threads
-            for e in t.emails
-            for n in _file_doc_names(_parse_attachments(e))
-        }
+    file_url_by_name = _get_file_urls(
+        {n for a in attachments.values() for n in _file_doc_names(a)}
     )
     data = []
     for thread in threads:
@@ -126,7 +127,9 @@ def get_linked_gmail_threads(doctype: str, docname: str | int):
                         "read_by_recipient": email.read_by_recipient,
                         "rating": 0,  # TODO: add rating
                         "recipients": email.recipients,
-                        "attachments": get_attachments_data(email, file_url_by_name),
+                        "attachments": get_attachments_data(
+                            email, file_url_by_name, attachments[email.name]
+                        ),
                         "_url": thread.get_url(),
                         "_doc_status": (
                             "Sent" if email.sent_or_received == "Sent" else "Received"
