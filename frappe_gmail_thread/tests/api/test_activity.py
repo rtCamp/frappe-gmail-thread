@@ -5,6 +5,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests import IntegrationTestCase
 
+from frappe_gmail_thread.api import activity as activity_api
 from frappe_gmail_thread.api.activity import (
     get_attachments_data,
     get_linked_gmail_threads,
@@ -49,6 +50,63 @@ class TestGetLinkedGmailThreads(IntegrationTestCase):
         make_test_user(TEST_USER)
         with as_user(TEST_USER):
             cls.account = make_test_gmail_account(linked_user=TEST_USER)
+
+    def test_resolves_attachments_across_emails_with_one_file_lookup(self):
+        """get_linked_gmail_threads resolves every email's attachment URLs fresh from File in a single lookup and drops attachments whose File is gone."""
+        files = [
+            frappe.get_doc(
+                {
+                    "doctype": "File",
+                    "file_name": f"batch-{i}.txt",
+                    "content": b"hi",
+                    "is_private": 1,
+                }
+            ).insert(ignore_permissions=True)
+            for i in range(2)
+        ]
+        make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id="timeline-thread-attachments",
+            reference_doctype="Gmail Account",
+            reference_name=self.account.name,
+            emails=[
+                {
+                    "gmail_message_id": "att-mid-1",
+                    "email_message_id": "<att-1@x.com>",
+                    "subject": "One",
+                    "sender": TEST_USER,
+                    "attachments_data": json.dumps(
+                        [{"file_doc_name": files[0].name, "file_url": "/old/0.txt"}]
+                    ),
+                },
+                {
+                    "gmail_message_id": "att-mid-2",
+                    "email_message_id": "<att-2@x.com>",
+                    "subject": "Two",
+                    "sender": TEST_USER,
+                    "attachments_data": json.dumps(
+                        [
+                            {"file_doc_name": files[1].name, "file_url": "/old/1.txt"},
+                            {
+                                "file_doc_name": "no-such-file",
+                                "file_url": "/old/gone.txt",
+                            },
+                        ]
+                    ),
+                },
+            ],
+        )
+        with patch.object(
+            activity_api, "get_file_urls", wraps=activity_api.get_file_urls
+        ) as lookup:
+            result = get_linked_gmail_threads("Gmail Account", self.account.name)
+        lookup.assert_called_once()
+        urls = [
+            a["file_url"]
+            for entry in result
+            for a in entry["template_data"]["doc"]["attachments"]
+        ]
+        self.assertEqual(sorted(urls), sorted([files[0].file_url, files[1].file_url]))
 
     def test_returns_one_timeline_entry_per_email_for_matching_threads(self):
         """get_linked_gmail_threads returns one timeline-entry dict per email for every Gmail Thread referencing the target doc."""
