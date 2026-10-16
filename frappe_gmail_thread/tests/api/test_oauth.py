@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, change_settings
+from frappe.utils.password import remove_encrypted_password
 
 from frappe_gmail_thread.api.oauth import (
     authorize_access,
@@ -278,31 +279,66 @@ class TestEnablePubsub(IntegrationTestCase):
 
 
 class TestDisablePubsub(IntegrationTestCase):
-    def test_returns_false_when_gmail_not_enabled(self):
-        """disable_pubsub returns False (no-op) when gmail_enabled=0."""
+    def test_stops_watch_when_gmail_not_enabled(self):
+        """disable_pubsub stops the watch of a disabled account: a watch started while it was enabled is still live."""
         account = _reset_account_with_labels(gmail_enabled=0)
-        with change_settings(
-            "Google Settings",
-            custom_gmail_sync_in_realtime=0,
-            custom_gmail_pubsub_topic="topic",
-        ):
-            with patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get:
-                result = disable_pubsub(account)
-        self.assertEqual(result, False)
-        mock_get.assert_not_called()
+        gmail = MagicMock()
+        with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
+            result = disable_pubsub(account)
+        self.assertTrue(result)
+        gmail.users().stop.assert_called_once_with(userId="me")
 
-    def test_returns_false_when_realtime_still_enabled(self):
-        """disable_pubsub returns False (no-op) when custom_gmail_sync_in_realtime is still 1."""
+    def test_stops_watch_while_realtime_enabled(self):
+        """disable_pubsub stops the watch even while real-time sync is on, which is the only time a watch exists."""
         account = _reset_account_with_labels(gmail_enabled=1)
+        gmail = MagicMock()
         with change_settings(
             "Google Settings",
             custom_gmail_sync_in_realtime=1,
             custom_gmail_pubsub_topic="topic",
         ):
-            with patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get:
+            with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
                 result = disable_pubsub(account)
-        self.assertEqual(result, False)
+        self.assertTrue(result)
+        gmail.users().stop.assert_called_once_with(userId="me")
+
+    def test_returns_false_without_refresh_token(self):
+        """disable_pubsub is a no-op for an account that was never authorized: there's no watch and no credentials."""
+        account = _reset_account_with_labels(gmail_enabled=1, refresh_token="")
+        with patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get:
+            result = disable_pubsub(account)
+        self.assertFalse(result)
         mock_get.assert_not_called()
+
+    def test_logs_instead_of_raising_when_stop_fails(self):
+        """A failing stop() call is logged and swallowed so the caller (delete / disable) still succeeds."""
+        account = _reset_account_with_labels(gmail_enabled=1)
+        gmail = MagicMock()
+        gmail.users().stop.return_value.execute.side_effect = RuntimeError("boom")
+        with (
+            patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail),
+            patch(f"{OAUTH_MODULE}.frappe.log_error") as mock_log,
+        ):
+            result = disable_pubsub(account)
+        self.assertFalse(result)
+        mock_log.assert_called_once()
+
+    def test_handled_auth_error_is_not_shown_to_the_user(self):
+        """When the mailbox's access is revoked, the 'authorization has expired' throw is logged, not queued for the user."""
+        account = _reset_account_with_labels(gmail_enabled=1)
+        frappe.clear_messages()
+
+        def revoked(_account):
+            frappe.throw("Your Gmail authorization has expired.")
+
+        with (
+            patch(f"{OAUTH_MODULE}.get_gmail_object", side_effect=revoked),
+            patch(f"{OAUTH_MODULE}.frappe.log_error") as mock_log,
+        ):
+            result = disable_pubsub(account)
+        self.assertFalse(result)
+        mock_log.assert_called_once()
+        self.assertEqual(frappe.get_message_log(), [])
 
     def test_calls_stop_when_account_enabled_and_realtime_disabled(self):
         """disable_pubsub calls users().stop() when gmail_enabled=1 and realtime=0."""
@@ -316,3 +352,18 @@ class TestDisablePubsub(IntegrationTestCase):
             with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
                 disable_pubsub(account)
         gmail.users().stop.assert_called_once_with(userId="me")
+
+    def test_no_api_call_once_the_stored_token_is_gone(self):
+        """When the stored token is already deleted (Frappe 15 deletes it before delete hooks), nothing is called or logged."""
+        account = _reset_account_with_labels(gmail_enabled=1, refresh_token="rt")
+        # as stored: a mask in the column, the token itself gone
+        frappe.db.set_value("Gmail Account", account.name, "refresh_token", "*" * 8)
+        remove_encrypted_password("Gmail Account", account.name, "refresh_token")
+        account.reload()
+        with (
+            patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get,
+            patch(f"{OAUTH_MODULE}.frappe.log_error") as mock_log,
+        ):
+            self.assertFalse(disable_pubsub(account))
+        mock_get.assert_not_called()
+        mock_log.assert_not_called()

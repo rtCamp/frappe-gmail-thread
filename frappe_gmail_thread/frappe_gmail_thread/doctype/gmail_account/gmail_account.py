@@ -7,7 +7,11 @@ from frappe.model.document import Document
 from frappe.rate_limiter import rate_limit
 from frappe.utils.background_jobs import is_job_enqueued
 
-from frappe_gmail_thread.api.oauth import disable_pubsub, enable_pubsub
+from frappe_gmail_thread.api.oauth import (
+    disable_pubsub,
+    discard_exception_message,
+    enable_pubsub,
+)
 from frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread import (
     sync_labels,
 )
@@ -19,15 +23,30 @@ class GmailAccount(Document):
         self.linked_user = frappe.session.user
         self.email_id = frappe.get_value("User", self.linked_user, "email")
 
-    def on_trash(self):
-        if not self.gmail_enabled:
-            return
-        if not self.refresh_token:
-            return
-        google_settings = frappe.get_single("Google Settings")
-        if not google_settings.custom_gmail_pubsub_topic:
-            return
+    def after_delete(self):
+        # not on_trash: it runs before the link check, so a delete refused because
+        # synced threads link to the account would already have stopped its watch
         disable_pubsub(self)
+
+    def start_watch(self) -> None:
+        """Start the Gmail watch if real-time sync is on; a failure is logged, not raised."""
+        google_settings = frappe.get_single("Google Settings")
+        if not (
+            google_settings.custom_gmail_sync_in_realtime
+            and google_settings.custom_gmail_pubsub_topic
+        ):
+            return
+        try:
+            enable_pubsub(self)
+        except Exception as e:
+            # the account stays enabled; the daily watch renewal tries again
+            discard_exception_message(e)
+            frappe.log_error(
+                title="Gmail Thread: failed to start Gmail watch",
+                message=f"{self.name}\n\n{frappe.get_traceback()}",
+            )
+            return
+        frappe.msgprint(_("Enabled Realtime Sync for {0}").format(self.linked_user))
 
     def validate(self):
         if self.gmail_enabled:
@@ -76,6 +95,15 @@ class GmailAccount(Document):
                         "Please set Client ID and Client Secret in Google Settings to enable Gmail"
                     )
                 )
+        if self.has_value_changed("gmail_enabled") and not self.gmail_enabled:
+            disable_pubsub(self)
+        elif (
+            self.has_value_changed("gmail_enabled")
+            and self.refresh_token
+            and not self.has_value_changed("refresh_token")
+        ):
+            # unticking stopped the watch; a new authorization starts it further down
+            self.start_watch()
         if self.has_value_changed("refresh_token") and self.refresh_token:
             sync_labels(self, should_save=False)
             google_settings = frappe.get_single("Google Settings")

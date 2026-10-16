@@ -146,11 +146,11 @@ extend_doctype_class = {
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"Communication": {
-# 		"after_insert": "frappe_gmail_thread.doc_events.communication.after_insert",
-# 	},
-# }
+doc_events = {
+    "Google Settings": {
+        "on_update": "frappe_gmail_thread.doc_events.google_settings.on_update",
+    },
+}
 
 # Fixtures
 # ----------

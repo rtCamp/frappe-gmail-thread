@@ -6,6 +6,7 @@ import google.oauth2.credentials
 import requests
 from frappe import _
 from frappe.integrations.google_oauth import GoogleOAuth
+from frappe.model.document import Document
 from googleapiclient.discovery import build
 
 SCOPES = "https://www.googleapis.com/auth/gmail.readonly"
@@ -175,18 +176,37 @@ def enable_pubsub(gmail_account):
     gmail.users().watch(userId="me", body=body).execute()
 
 
-def disable_pubsub(gmail_account):
-    google_settings = frappe.get_single("Google Settings")
-    if not gmail_account.gmail_enabled or google_settings.custom_gmail_sync_in_realtime:
+def disable_pubsub(gmail_account: Document) -> bool:
+    """Stop the Gmail watch for the account's mailbox.
+
+    A watch can outlive the settings that started it, so this doesn't look at
+    Gmail Enabled or real-time sync. Failures are logged, not raised, so a
+    mailbox with revoked access can still be disabled or deleted.
+    """
+    # Frappe 15 deletes the stored token before any delete hook runs: with nothing to
+    # call Gmail with, the watch expires within 7 days and its pushes are ignored
+    if not gmail_account.get_password("refresh_token", raise_exception=False):
         return False
-    if not gmail_account.refresh_token:
-        frappe.throw(
-            _("Please authorize Gmail by clicking on 'Authorize Gmail' button.")
+    try:
+        gmail = get_gmail_object(gmail_account)
+        gmail.users().stop(userId="me").execute()
+    except Exception as e:
+        discard_exception_message(e)
+        frappe.log_error(
+            title="Gmail Thread: failed to stop Gmail watch",
+            message=f"{gmail_account.name}\n\n{frappe.get_traceback()}",
         )
-    if not google_settings.custom_gmail_pubsub_topic:
-        frappe.throw(_("Please configure PubSub in Email Account."))
-    gmail = get_gmail_object(gmail_account)
-    gmail.users().stop(userId="me").execute()
+        return False
+    return True
+
+
+def discard_exception_message(exc: Exception) -> None:
+    """Drop the message `frappe.throw` queued for `exc`, once the caller has handled it."""
+    exc_id = getattr(exc, "__frappe_exc_id", None)
+    if exc_id:
+        frappe.local.message_log = [
+            m for m in frappe.local.message_log if m.get("__frappe_exc_id") != exc_id
+        ]
 
 
 def get_access_token(gmail_account):
