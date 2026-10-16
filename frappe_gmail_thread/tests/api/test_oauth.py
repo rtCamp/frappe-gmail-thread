@@ -2,8 +2,11 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, change_settings
+from frappe.utils import add_to_date
+from frappe.utils.password import get_decrypted_password
 
 from frappe_gmail_thread.api.oauth import (
+    GmailAuthorizationExpiredError,
     authorize_access,
     callback,
     check_gmail_object,
@@ -11,6 +14,7 @@ from frappe_gmail_thread.api.oauth import (
     enable_pubsub,
     get_access_token,
     get_auth_url,
+    handle_expired_authorization,
 )
 from frappe_gmail_thread.tests import (
     TEST_USER,
@@ -174,9 +178,68 @@ class TestCheckGmailObject(IntegrationTestCase):
         """check_gmail_object throws a clear 'authorization expired' error when Google returns invalid_grant."""
         gmail = MagicMock()
         gmail.users().getProfile().execute.side_effect = Exception("invalid_grant")
-        with self.assertRaises(frappe.ValidationError) as ctx:
+        with self.assertRaises(GmailAuthorizationExpiredError) as ctx:
             check_gmail_object(self.account, gmail)
         self.assertIn("authorization has expired", str(ctx.exception))
+
+
+class TestHandleExpiredAuthorization(IntegrationTestCase):
+    def _alerts(self, account_name):
+        return frappe.db.count(
+            "Notification Log",
+            {
+                "for_user": TEST_USER,
+                "type": "Alert",
+                "document_type": "Gmail Account",
+                "document_name": account_name,
+            },
+        )
+
+    def _token(self, account_name):
+        return get_decrypted_password(
+            "Gmail Account", account_name, "refresh_token", raise_exception=False
+        )
+
+    def test_handles_an_expiry_once(self):
+        """Two jobs hitting the same expiry clear the token and alert the owner once."""
+        account = _reset_account_with_labels(refresh_token="rt")
+        alerts_before = self._alerts(account.name)
+
+        handle_expired_authorization(account)
+        handle_expired_authorization(account)
+
+        self.assertIsNone(self._token(account.name))
+        self.assertEqual(self._alerts(account.name), alerts_before + 1)
+
+    def test_alerts_owner_whose_email_differs_from_user_name(self):
+        """The alert reaches the owner even when their email is no longer their user name."""
+        account = _reset_account_with_labels(refresh_token="rt")
+        alerts_before = self._alerts(account.name)
+        frappe.db.set_value("User", TEST_USER, "email", "test_fgt_renamed@example.com")
+        self.addCleanup(frappe.db.set_value, "User", TEST_USER, "email", TEST_USER)
+
+        handle_expired_authorization(account)
+
+        self.assertEqual(self._alerts(account.name), alerts_before + 1)
+
+    def test_keeps_token_issued_after_the_account_was_loaded(self):
+        """A job holding the account from before a re-authorization neither clears the new token nor alerts."""
+        stale = _reset_account_with_labels(refresh_token="rt")
+        alerts_before = self._alerts(stale.name)
+        # the owner re-authorizes: a new token is saved
+        set_password_field("Gmail Account", stale.name, "refresh_token", "new-rt")
+        frappe.db.set_value(
+            "Gmail Account",
+            stale.name,
+            "modified",
+            add_to_date(stale.modified, seconds=1),
+            update_modified=False,
+        )
+
+        handle_expired_authorization(stale)
+
+        self.assertEqual(self._token(stale.name), "new-rt")
+        self.assertEqual(self._alerts(stale.name), alerts_before)
 
 
 class TestGetAccessToken(IntegrationTestCase):
