@@ -13,6 +13,7 @@ from frappe_gmail_thread.tests import (
     make_test_gmail_account,
     make_test_user,
 )
+from frappe_gmail_thread.utils.sync_pause import pause_sync
 
 PUBSUB_MODULE = "frappe_gmail_thread.api.pubsub"
 
@@ -155,6 +156,31 @@ class TestPubsubCallback(IntegrationTestCase):
                 result = callback()
         self.assertEqual(result, "OK")
         mock_log.assert_called_once()
+        mock_enqueue.assert_not_called()
+
+    def test_does_not_enqueue_sync_for_paused_mailbox(self):
+        """A notification for a mailbox Gmail asked to back off is acknowledged without queuing a sync."""
+        body = _build_request({"emailAddress": TEST_USER, "historyId": 500})
+        request = MagicMock()
+        request.get_data.return_value = body
+        frappe.db.set_value("User", TEST_USER, "user_type", "System User")
+        pause_sync(TEST_USER, 60)
+        self.addCleanup(
+            frappe.cache.delete_value, f"gmail_thread_sync_paused:{TEST_USER}"
+        )
+        with change_settings(
+            "Google Settings",
+            enable=1,
+            custom_gmail_sync_in_realtime=1,
+            custom_gmail_pubsub_topic="topic",
+        ):
+            with (
+                patch(f"{PUBSUB_MODULE}.frappe.request", request),
+                patch(f"{PUBSUB_MODULE}.is_job_enqueued", return_value=False),
+                patch(f"{PUBSUB_MODULE}.frappe.enqueue") as mock_enqueue,
+            ):
+                result = callback()
+        self.assertEqual(result, "OK")
         mock_enqueue.assert_not_called()
 
 
