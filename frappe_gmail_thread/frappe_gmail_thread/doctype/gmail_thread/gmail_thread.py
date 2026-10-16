@@ -231,7 +231,6 @@ def sync(user=None):
                                 if len(gmail_thread.involved_users) != before:
                                     prev_modified = gmail_thread.modified
                                     gmail_thread.save(ignore_permissions=True)
-                                    frappe.db.commit()  # nosemgrep
                                     frappe.db.set_value(
                                         "Gmail Thread",
                                         gmail_thread.name,
@@ -313,30 +312,22 @@ def sync(user=None):
                         gmail_thread.append("emails", email, position=pos)
                         latest_dt = gmail_thread.emails[-1].date_and_time
                         gmail_thread.save(ignore_permissions=True)
-                        frappe.db.commit()  # nosemgrep
+                        # in the same transaction as the save, so a later failure
+                        # in this thread can't leave it with the import time
+                        thread_values = {
+                            "modified": latest_dt,
+                            "owner": gmail_account.linked_user,
+                        }
+                        if is_new_thread:
+                            thread_values["creation"] = email.date_and_time
                         frappe.db.set_value(
                             "Gmail Thread",
                             gmail_thread.name,
-                            "modified",
-                            latest_dt,
+                            thread_values,
                             update_modified=False,
                         )
-                        if is_new_thread:  # update creation date
-                            frappe.db.set_value(
-                                "Gmail Thread",
-                                gmail_thread.name,
-                                "creation",
-                                email.date_and_time,
-                                update_modified=False,
-                            )
-                        frappe.db.set_value(
-                            "Gmail Thread",
-                            gmail_thread.name,
-                            "owner",
-                            gmail_account.linked_user,
-                            modified_by=gmail_account.linked_user,
-                            update_modified=False,
-                        )
+                    # one transaction per thread: commit the thread's emails together
+                    frappe.db.commit()  # nosemgrep
                 gmail_account.reload()
                 gmail_account.last_historyid = max_history_id
                 gmail_account.save(ignore_permissions=True)

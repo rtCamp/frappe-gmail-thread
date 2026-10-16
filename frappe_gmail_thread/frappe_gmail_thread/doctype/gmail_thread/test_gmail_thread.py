@@ -451,6 +451,100 @@ class TestSyncPreconditions(_GmailThreadTestCase):
         gmail.users().history().list.assert_not_called()
 
 
+class TestInitialSyncTransactions(_GmailThreadTestCase):
+    """The initial sync imports each thread in one transaction."""
+
+    def _sync_thread(self, dates, fail_on=None):
+        """Initial-sync one thread whose messages carry `dates`; return (thread name, commit count)."""
+        _reset_account_for_sync(last_historyid=0)
+        key = frappe.generate_hash(length=8)
+        thread_id = f"tx-{key}"
+        gmail = MagicMock()
+        gmail.users().threads().list.return_value.execute.return_value = {
+            "threads": [{"id": thread_id}]
+        }
+        gmail.users().threads().get.return_value.execute.return_value = {
+            "messages": [
+                {"id": f"tx-{key}-{i}", "historyId": str(10 + i)}
+                for i in range(len(dates))
+            ]
+        }
+        gmail.users().messages().get.return_value.execute.return_value = {
+            "labelIds": ["INBOX"]
+        }
+
+        def incoming(raw_email, gmail_account):
+            i = incoming.calls
+            incoming.calls += 1
+            if i == fail_on:
+                raise RuntimeError("unparseable message")
+            email = frappe._dict(
+                doctype="Single Email CT",
+                gmail_message_id=f"tx-{key}-{i}",
+                email_message_id=f"tx-{key}-{i}@x.com",
+                subject="Import",
+                date_and_time=dates[i],
+            )
+            email_object = SimpleNamespace(
+                message_id=email.email_message_id,
+                from_email=TEST_USER,
+                to=[],
+                cc=[],
+                bcc=[],
+                mail={"References": None},
+            )
+            return email, email_object
+
+        incoming.calls = 0
+        with as_user("Administrator"):
+            with (
+                change_settings(
+                    "Google Settings", enable=1, client_id="cid", client_secret="csec"
+                ),
+                patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail),
+                patch(f"{GMAIL_THREAD_MODULE}.create_new_email", side_effect=incoming),
+                patch(f"{GMAIL_THREAD_MODULE}.find_gmail_thread", return_value=None),
+                patch(f"{GMAIL_THREAD_MODULE}.process_attachments"),
+                patch(f"{GMAIL_THREAD_MODULE}.replace_inline_images"),
+                patch(f"{GMAIL_THREAD_MODULE}.frappe.log_error"),
+                patch.object(frappe.db, "commit") as mock_commit,
+            ):
+                sync(user=TEST_USER)
+        return thread_id, mock_commit.call_count
+
+    def test_commits_once_per_thread_not_per_email(self):
+        """A thread is committed once, whatever its number of emails, then the label's sync position once."""
+        _, one_email = self._sync_thread(["2026-01-01 10:00:00"])
+        _, three_emails = self._sync_thread(
+            ["2026-01-01 10:00:00", "2026-01-01 11:00:00", "2026-01-01 12:00:00"]
+        )
+        self.assertEqual(one_email, 2)
+        self.assertEqual(three_emails, 2)
+
+    def test_thread_dates_and_owner_come_from_its_emails(self):
+        """modified is the latest email's date, creation the earliest's, owner the account's user, whatever the order."""
+        thread_id, _ = self._sync_thread(
+            ["2026-01-01 10:00:00", "2026-01-01 09:00:00", "2026-01-01 11:00:00"]
+        )
+        thread = frappe.db.get_value(
+            "Gmail Thread", thread_id, ["modified", "creation", "owner"], as_dict=True
+        )
+        self.assertEqual(str(thread.modified), "2026-01-01 11:00:00")
+        self.assertEqual(str(thread.creation), "2026-01-01 09:00:00")
+        self.assertEqual(thread.owner, TEST_USER)
+
+    def test_emails_before_a_failing_message_keep_correct_dates(self):
+        """When a later message of the thread fails, the emails already added still carry their own dates, not the import time."""
+        thread_id, _ = self._sync_thread(
+            ["2026-01-01 10:00:00", "2026-01-01 11:00:00"], fail_on=1
+        )
+        thread = frappe.db.get_value(
+            "Gmail Thread", thread_id, ["modified", "creation"], as_dict=True
+        )
+        self.assertEqual(str(thread.modified), "2026-01-01 10:00:00")
+        self.assertEqual(str(thread.creation), "2026-01-01 10:00:00")
+
+
 class TestSyncErrorHandling(_GmailThreadTestCase):
     def test_resets_last_historyid_on_history_api_not_found(self):
         """A notFound HttpError from history().list resets last_historyid to 0."""
