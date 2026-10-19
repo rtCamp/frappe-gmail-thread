@@ -5,11 +5,20 @@ import frappe.utils
 import google.oauth2.credentials
 import requests
 from frappe import _
+from frappe.desk.doctype.notification_log.notification_log import (
+    enqueue_create_notification,
+)
 from frappe.integrations.google_oauth import GoogleOAuth
 from frappe.model.document import Document
+from frappe.utils import get_datetime
+from frappe.utils.password import remove_encrypted_password
 from googleapiclient.discovery import build
 
 SCOPES = "https://www.googleapis.com/auth/gmail.readonly"
+
+
+class GmailAuthorizationExpiredError(frappe.ValidationError):
+    """Google rejected the stored refresh token: access was revoked or has expired."""
 
 
 def get_authentication_url(client_id=None, redirect_uri=None):
@@ -290,7 +299,8 @@ def check_gmail_object(account, gmail):
             frappe.throw(
                 _(
                     "Your Gmail authorization has expired. Click on {0} in Email Account to re-authorize."
-                ).format(button_label)
+                ).format(button_label),
+                GmailAuthorizationExpiredError,
             )
         raise
     user = frappe.get_doc("User", {"email": email})
@@ -299,3 +309,51 @@ def check_gmail_object(account, gmail):
     if user.name != account.linked_user:
         frappe.throw(_("You can only authorize access for your own email account"))
     return gmail
+
+
+def handle_expired_authorization(gmail_account: Document) -> None:
+    """Forget the refresh token Google rejected and ask the account owner to re-authorize.
+
+    Without a refresh token the account drops out of scheduled syncs, Pub/Sub
+    triggered syncs and the daily watch renewal, so an expiry is handled once
+    instead of failing every sync until someone re-authorizes.
+    """
+    # A sync and the daily watch renewal can hit the same expiry, and the owner can
+    # re-authorize in the meantime. Lock the account and act only while it is unchanged
+    # since it was loaded: once per expiry, and never on a newly issued token.
+    current = frappe.db.get_value(
+        "Gmail Account",
+        gmail_account.name,
+        ["refresh_token", "modified"],
+        as_dict=True,
+        for_update=True,
+    )
+    if (
+        not current
+        or not current.refresh_token
+        or get_datetime(current.modified) != get_datetime(gmail_account.modified)
+    ):
+        return
+    remove_encrypted_password("Gmail Account", gmail_account.name, "refresh_token")
+    frappe.db.set_value(
+        "Gmail Account",
+        gmail_account.name,
+        "refresh_token",
+        None,
+        update_modified=False,
+    )
+    frappe.logger("frappe_gmail_thread").info(
+        f"Gmail authorization expired for {gmail_account.name}, refresh token cleared"
+    )
+    # notifications are addressed by email, which can differ from the user's name
+    enqueue_create_notification(
+        frappe.db.get_value("User", gmail_account.linked_user, "email"),
+        {
+            "type": "Alert",
+            "document_type": "Gmail Account",
+            "document_name": gmail_account.name,
+            "subject": _(
+                "Gmail sync has stopped because your Gmail authorization expired. Open your Gmail Account and click {0} to resume it."
+            ).format(frappe.bold(_("Authorize Gmail"))),
+        },
+    )

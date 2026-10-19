@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 import frappe
 import googleapiclient.errors
 from frappe.tests import IntegrationTestCase, change_settings
+from frappe.utils.password import get_decrypted_password
+from google.auth.exceptions import RefreshError
 
 from frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread import (
     get_permission_query_conditions,
@@ -13,6 +15,7 @@ from frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread i
     sync_labels,
     update_involved_users,
 )
+from frappe_gmail_thread.tasks.sync import sync_emails
 from frappe_gmail_thread.tests import (
     TEST_USER,
     TEST_USER_2,
@@ -28,6 +31,8 @@ from frappe_gmail_thread.utils.helpers import AlreadyExistsError
 GMAIL_THREAD_MODULE = (
     "frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread"
 )
+OAUTH_MODULE = "frappe_gmail_thread.api.oauth"
+SYNC_TASK_MODULE = "frappe_gmail_thread.tasks.sync"
 
 
 class _GmailThreadTestCase(IntegrationTestCase):
@@ -468,21 +473,32 @@ class TestSyncDispatch(_GmailThreadTestCase):
 
 
 class TestSyncPreconditions(_GmailThreadTestCase):
-    def test_throws_when_gmail_not_enabled(self):
-        """sync throws when gmail_enabled is 0."""
+    def test_skips_account_disabled_after_job_was_queued(self):
+        """sync returns without calling Gmail when the account has been disabled since the job was queued."""
         account = _reset_account_for_sync()
         frappe.db.set_value("Gmail Account", account.name, "gmail_enabled", 0)
         with as_user("Administrator"):
-            with self.assertRaises(frappe.ValidationError):
+            with patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object") as mock_get:
                 sync(user=TEST_USER)
+        mock_get.assert_not_called()
 
-    def test_throws_when_no_refresh_token(self):
-        """sync throws when refresh_token is empty."""
+    def test_skips_account_without_authorization(self):
+        """sync returns without calling Gmail when the account has no refresh token (never authorized, or expired)."""
         account = _reset_account_for_sync()
         set_password_field("Gmail Account", account.name, "refresh_token", "")
         with as_user("Administrator"):
-            with self.assertRaises(frappe.ValidationError):
+            with patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object") as mock_get:
                 sync(user=TEST_USER)
+        mock_get.assert_not_called()
+
+    def test_skips_user_whose_account_was_deleted(self):
+        """sync returns quietly for a user with no Gmail Account (deleted after the job was queued)."""
+        no_account_user = "test_fgt_no_gmail_account@example.com"
+        make_test_user(no_account_user)
+        with as_user("Administrator"):
+            with patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object") as mock_get:
+                sync(user=no_account_user)
+        mock_get.assert_not_called()
 
     def test_returns_silently_when_no_enabled_labels(self):
         """sync returns silently when no labels are enabled (no API calls)."""
@@ -493,6 +509,96 @@ class TestSyncPreconditions(_GmailThreadTestCase):
                 sync(user=TEST_USER)
         gmail.users().threads().list.assert_not_called()
         gmail.users().history().list.assert_not_called()
+
+
+def _revoked_gmail():
+    """A Gmail client whose token refresh fails the way Google reports a revoked or expired grant."""
+    gmail = MagicMock()
+    gmail.users().getProfile().execute.side_effect = RefreshError(
+        "invalid_grant: Token has been expired or revoked.",
+        {
+            "error": "invalid_grant",
+            "error_description": "Token has been expired or revoked.",
+        },
+    )
+    return gmail
+
+
+class TestSyncExpiredAuthorization(_GmailThreadTestCase):
+    def _sync_with_revoked_grant(self):
+        with (
+            patch(f"{OAUTH_MODULE}.get_access_token", return_value=None),
+            patch(f"{OAUTH_MODULE}.build", return_value=_revoked_gmail()),
+            patch("frappe.log_error") as mock_log,
+        ):
+            with as_user("Administrator"):
+                sync(user=TEST_USER)
+        return mock_log
+
+    def _alerts(self, account_name):
+        return frappe.get_all(
+            "Notification Log",
+            filters={
+                "for_user": TEST_USER,
+                "type": "Alert",
+                "document_type": "Gmail Account",
+                "document_name": account_name,
+            },
+            pluck="name",
+        )
+
+    def test_revoked_grant_clears_token_and_alerts_owner_without_error_log(self):
+        """When Google rejects the refresh token, sync forgets it, alerts the account owner and writes no Error Log."""
+        account = _reset_account_for_sync(last_historyid=100)
+        alerts_before = len(self._alerts(account.name))
+
+        mock_log = self._sync_with_revoked_grant()
+
+        mock_log.assert_not_called()
+        self.assertFalse(
+            frappe.db.get_value("Gmail Account", account.name, "refresh_token")
+        )
+        self.assertIsNone(
+            get_decrypted_password(
+                "Gmail Account", account.name, "refresh_token", raise_exception=False
+            )
+        )
+        self.assertEqual(len(self._alerts(account.name)), alerts_before + 1)
+        # the sync position is kept so a re-authorization resumes where it stopped
+        self.assertEqual(
+            frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 100
+        )
+
+    def test_misconfigured_oauth_client_keeps_tokens(self):
+        """A site-wide OAuth problem (invalid_client) isn't a per-user expiry: the token is kept and the error surfaces."""
+        account = _reset_account_for_sync()
+        gmail = MagicMock()
+        gmail.users().getProfile().execute.side_effect = RefreshError(
+            "invalid_client: The OAuth client was not found.",
+            {"error": "invalid_client"},
+        )
+        with (
+            patch(f"{OAUTH_MODULE}.get_access_token", return_value=None),
+            patch(f"{OAUTH_MODULE}.build", return_value=gmail),
+        ):
+            with as_user("Administrator"):
+                with self.assertRaises(RefreshError):
+                    sync(user=TEST_USER)
+        self.assertTrue(
+            frappe.db.get_value("Gmail Account", account.name, "refresh_token")
+        )
+
+    def test_scheduler_stops_syncing_the_account_after_expiry(self):
+        """Once handled, the expired account is left out of the 30-minute sync until it is re-authorized."""
+        _reset_account_for_sync()
+        self._sync_with_revoked_grant()
+        with (
+            patch(f"{SYNC_TASK_MODULE}.is_job_enqueued", return_value=False),
+            patch(f"{SYNC_TASK_MODULE}.frappe.enqueue") as mock_enqueue,
+        ):
+            sync_emails()
+        enqueued_for = {c.kwargs["user"] for c in mock_enqueue.call_args_list}
+        self.assertNotIn(TEST_USER, enqueued_for)
 
 
 class TestIsNotFoundError(_GmailThreadTestCase):
