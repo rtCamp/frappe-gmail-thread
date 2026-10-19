@@ -105,6 +105,9 @@ class GmailAccount(Document):
             # unticking stopped the watch; a new authorization starts it further down
             self.start_watch()
         if self.has_value_changed("refresh_token") and self.refresh_token:
+            # authorized again: no more re-authorization reminders
+            self.authorization_expired_on = None
+            self.reauthorization_email_sent_on = None
             sync_labels(self, should_save=False)
             google_settings = frappe.get_single("Google Settings")
             if (

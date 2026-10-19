@@ -10,9 +10,11 @@ from frappe.desk.doctype.notification_log.notification_log import (
 )
 from frappe.integrations.google_oauth import GoogleOAuth
 from frappe.model.document import Document
-from frappe.utils import get_datetime
+from frappe.utils import get_datetime, now_datetime
 from frappe.utils.password import remove_encrypted_password
 from googleapiclient.discovery import build
+
+from frappe_gmail_thread.utils.reauthorization import enqueue_reauthorization_email
 
 SCOPES = "https://www.googleapis.com/auth/gmail.readonly"
 
@@ -312,7 +314,7 @@ def check_gmail_object(account, gmail):
 
 
 def handle_expired_authorization(gmail_account: Document) -> None:
-    """Forget the refresh token Google rejected and ask the account owner to re-authorize.
+    """Forget the refresh token Google rejected and ask the account owner, by alert and email, to re-authorize.
 
     Without a refresh token the account drops out of scheduled syncs, Pub/Sub
     triggered syncs and the daily watch renewal, so an expiry is handled once
@@ -338,8 +340,11 @@ def handle_expired_authorization(gmail_account: Document) -> None:
     frappe.db.set_value(
         "Gmail Account",
         gmail_account.name,
-        "refresh_token",
-        None,
+        {
+            "refresh_token": None,
+            "authorization_expired_on": now_datetime(),
+            "reauthorization_email_sent_on": None,
+        },
         update_modified=False,
     )
     frappe.logger("frappe_gmail_thread").info(
@@ -357,3 +362,4 @@ def handle_expired_authorization(gmail_account: Document) -> None:
             ).format(frappe.bold(_("Authorize Gmail"))),
         },
     )
+    enqueue_reauthorization_email(gmail_account.name)

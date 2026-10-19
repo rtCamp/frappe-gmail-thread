@@ -222,6 +222,21 @@ class TestHandleExpiredAuthorization(IntegrationTestCase):
 
         self.assertEqual(self._alerts(account.name), alerts_before + 1)
 
+    def test_records_expiry_and_emails_owner_once(self):
+        """The expiry is recorded on the account and emailed to its owner once, however many jobs hit it."""
+        account = _reset_account_with_labels(refresh_token="rt")
+
+        with patch(f"{OAUTH_MODULE}.enqueue_reauthorization_email") as mock_email:
+            handle_expired_authorization(account)
+            handle_expired_authorization(account)
+
+        mock_email.assert_called_once_with(account.name)
+        self.assertIsNotNone(
+            frappe.db.get_value(
+                "Gmail Account", account.name, "authorization_expired_on"
+            )
+        )
+
     def test_keeps_token_issued_after_the_account_was_loaded(self):
         """A job holding the account from before a re-authorization neither clears the new token nor alerts."""
         stale = _reset_account_with_labels(refresh_token="rt")
@@ -236,10 +251,12 @@ class TestHandleExpiredAuthorization(IntegrationTestCase):
             update_modified=False,
         )
 
-        handle_expired_authorization(stale)
+        with patch(f"{OAUTH_MODULE}.enqueue_reauthorization_email") as mock_email:
+            handle_expired_authorization(stale)
 
         self.assertEqual(self._token(stale.name), "new-rt")
         self.assertEqual(self._alerts(stale.name), alerts_before)
+        mock_email.assert_not_called()
 
 
 class TestGetAccessToken(IntegrationTestCase):
