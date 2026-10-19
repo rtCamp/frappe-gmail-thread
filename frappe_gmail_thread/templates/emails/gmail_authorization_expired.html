@@ -1,0 +1,15 @@
+{# Available: first_name, full_name, email_id, expired_on, link (to the Gmail Account), reminder_days (0 = no reminders), is_reminder, and every Gmail Account field #}
+<h1 class="email-header-title">{% if is_reminder %}Gmail sync is still stopped{% else %}Gmail sync has stopped{% endif %}</h1>
+<p>Hi {{ first_name }},</p>
+<p>
+	Gmail sync for <b>{{ email_id }}</b> stopped on {{ expired_on }} because its Gmail authorization expired or was revoked.
+	Emails in this mailbox are not synced until Gmail is authorized again.
+</p>
+<p>Open your Gmail Account and click <b>Authorize Gmail</b> to resume the sync.</p>
+<p><a class="btn btn-primary" href="{{ link }}">Open Gmail Account</a></p>
+{% if reminder_days %}
+<p class="text-muted">
+	You will get a reminder every {% if reminder_days == 1 %}day{% else %}{{ reminder_days }} days{% endif %} until then.
+	If you no longer need Gmail sync, untick <b>Gmail Enabled</b> on your Gmail Account to stop these reminders.
+</p>
+{% endif %}

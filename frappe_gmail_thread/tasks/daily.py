@@ -5,6 +5,11 @@ from frappe_gmail_thread.api.oauth import (
     enable_pubsub,
     handle_expired_authorization,
 )
+from frappe_gmail_thread.utils.reauthorization import (
+    enqueue_reauthorization_email,
+    get_reminder_days,
+    is_reminder_due,
+)
 
 
 def enable_pubsub_everyday():
@@ -36,3 +41,29 @@ def enable_pubsub_everyday():
         except Exception as e:
             frappe.log_error(title="PubSub Error", message=e)
             continue
+
+
+def send_reauthorization_reminders() -> None:
+    """Remind the owners of enabled Gmail Accounts whose authorization expired to authorize Gmail again."""
+    if not frappe.db.get_single_value("Google Settings", "enable"):
+        return
+    reminder_days = get_reminder_days()
+    if not reminder_days:
+        return
+
+    gmail_accounts = frappe.get_all(
+        "Gmail Account",
+        filters={
+            "gmail_enabled": 1,
+            "refresh_token": ["is", "not set"],
+            "authorization_expired_on": ["is", "set"],
+        },
+        fields=["name", "authorization_expired_on", "reauthorization_email_sent_on"],
+    )
+    for gmail_account in gmail_accounts:
+        if is_reminder_due(
+            gmail_account.authorization_expired_on,
+            gmail_account.reauthorization_email_sent_on,
+            reminder_days,
+        ):
+            enqueue_reauthorization_email(gmail_account.name)

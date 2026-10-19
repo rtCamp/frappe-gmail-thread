@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, change_settings
+from frappe.utils import now_datetime
 
 from frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_account.gmail_account import (
     sync_labels_api,
@@ -264,6 +265,32 @@ class TestGmailAccountBeforeSave(_GmailAccountTestCase):
                 account.save(ignore_permissions=True)
         mock_disable.assert_called()
         mock_enable.assert_not_called()
+
+    def test_new_authorization_ends_reauthorization_reminders(self):
+        """Authorizing Gmail again clears the recorded expiry, which stops the reminder emails."""
+        account = _reset_account(gmail_enabled=0)
+        frappe.db.set_value(
+            "Gmail Account",
+            account.name,
+            {
+                "authorization_expired_on": now_datetime(),
+                "reauthorization_email_sent_on": now_datetime(),
+            },
+            update_modified=False,
+        )
+        account.reload()
+        account.refresh_token = "new-token"
+        with change_settings("Google Settings", custom_gmail_sync_in_realtime=0):
+            with patch(f"{GMAIL_ACCOUNT_MODULE}.sync_labels"):
+                account.save(ignore_permissions=True)
+        self.assertEqual(
+            frappe.db.get_value(
+                "Gmail Account",
+                account.name,
+                ["authorization_expired_on", "reauthorization_email_sent_on"],
+            ),
+            (None, None),
+        )
 
     def test_unticking_gmail_enabled_stops_watch(self):
         """Saving an account with Gmail Enabled unticked stops its Gmail watch."""

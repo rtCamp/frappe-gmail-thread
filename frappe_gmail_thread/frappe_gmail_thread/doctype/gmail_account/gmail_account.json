@@ -15,6 +15,8 @@
   "authorization_code",
   "refresh_token",
   "last_historyid",
+  "authorization_expired_on",
+  "reauthorization_email_sent_on",
   "labels_to_sync_section",
   "labels"
  ],
@@ -60,6 +62,20 @@
    "read_only": 1
   },
   {
+   "fieldname": "authorization_expired_on",
+   "fieldtype": "Datetime",
+   "label": "Authorization Expired On",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "reauthorization_email_sent_on",
+   "fieldtype": "Datetime",
+   "label": "Re-authorization Email Sent On",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
    "depends_on": "eval:doc.gmail_enabled == true;",
    "fieldname": "linked_user",
    "fieldtype": "Link",
@@ -89,7 +105,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-07-21 19:07:34.020047",
+ "modified": "2026-10-19 15:18:44.992646",
  "modified_by": "Administrator",
  "module": "Frappe Gmail Thread",
  "name": "Gmail Account",
