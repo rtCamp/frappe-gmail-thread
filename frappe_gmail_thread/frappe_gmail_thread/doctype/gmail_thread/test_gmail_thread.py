@@ -1,9 +1,11 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import frappe
 import googleapiclient.errors
 from frappe.tests import IntegrationTestCase, change_settings
+from frappe.utils import get_datetime
 from frappe.utils.password import get_decrypted_password
 from google.auth.exceptions import RefreshError
 
@@ -27,6 +29,9 @@ from frappe_gmail_thread.tests import (
     set_password_field,
 )
 from frappe_gmail_thread.utils.helpers import AlreadyExistsError
+from frappe_gmail_thread.utils.helpers import (
+    find_gmail_thread as real_find_gmail_thread,
+)
 
 GMAIL_THREAD_MODULE = (
     "frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_thread.gmail_thread"
@@ -626,6 +631,268 @@ class TestIsNotFoundError(_GmailThreadTestCase):
         self.assertFalse(is_not_found_error(self._error(502, b"Bad Gateway")))
 
 
+class TestSyncConcurrentMailboxes(_GmailThreadTestCase):
+    """Syncs of different mailboxes update the same thread at the same time."""
+
+    def setUp(self):
+        self.account = _reset_account_for_sync(last_historyid=100)
+        frappe.db.set_value("User", TEST_USER, "user_type", "System User")
+        self.thread = make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id=f"race-{frappe.generate_hash(length=10)}",
+            emails=[_email_row("first", "2026-10-12 09:00:00")],
+        )
+        # the other mailbox's connection must see the thread
+        frappe.db.commit()  # nosemgrep
+
+    def _gmail(self, *messages):
+        gmail = MagicMock()
+        gmail.users().history().list.return_value.execute.return_value = {
+            "history": [{"messages": [{"id": m, "threadId": t} for m, t in messages]}],
+            "historyId": "200",
+        }
+        gmail.users().messages().get.return_value.execute.return_value = {
+            "labelIds": ["INBOX"]
+        }
+        return gmail
+
+    @contextmanager
+    def _other_mailbox(self):
+        """Run the block as a parallel sync would: on a separate DB connection."""
+        user = frappe.session.user
+        # primary_connection() restores the sync's connection afterwards, which
+        # secondary_connection() alone doesn't on its first use
+        with self.primary_connection(), self.secondary_connection():
+            yield
+        frappe.set_user(user)
+
+    def _other_mailbox_appends(self, row):
+        """Append `row` to the thread from another connection and commit."""
+        with self._other_mailbox():
+            other = frappe.get_doc("Gmail Thread", self.thread.name)
+            other.append("emails", row)
+            other.save(ignore_permissions=True)
+            frappe.db.commit()  # nosemgrep
+
+    def _thread_is_locked(self, name):
+        with self._other_mailbox():
+            try:
+                frappe.db.sql(
+                    "select name from `tabGmail Thread` where name = %s for update nowait",
+                    name,
+                )
+                return False
+            except frappe.QueryTimeoutError:
+                return True
+            finally:
+                frappe.db.rollback()
+
+    def _sync(self, gmail, incoming, find_gmail_thread=None, process_attachments=None):
+        with (
+            change_settings(
+                "Google Settings", enable=1, client_id="cid", client_secret="csec"
+            ),
+            patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail),
+            patch(f"{GMAIL_THREAD_MODULE}.create_new_email", side_effect=incoming),
+            patch(
+                f"{GMAIL_THREAD_MODULE}.find_gmail_thread",
+                side_effect=find_gmail_thread or real_find_gmail_thread,
+            ),
+            patch(
+                f"{GMAIL_THREAD_MODULE}.process_attachments",
+                side_effect=process_attachments,
+            ),
+            patch(f"{GMAIL_THREAD_MODULE}.replace_inline_images"),
+            patch(f"{GMAIL_THREAD_MODULE}.frappe.log_error") as mock_log,
+        ):
+            with as_user("Administrator"):
+                sync(user=TEST_USER)
+        return mock_log
+
+    def _rfc_ids(self):
+        return frappe.get_all(
+            "Single Email CT",
+            filters={"parent": self.thread.name},
+            pluck="email_message_id",
+        )
+
+    def test_email_committed_meanwhile_by_another_mailbox_is_kept(self):
+        """A sync that read the thread before another mailbox's sync appended an email still saves, keeping both emails."""
+
+        def find_then_other_mailbox_appends(thread_id, message_ids=None):
+            found = real_find_gmail_thread(thread_id, message_ids)
+            self._other_mailbox_appends(_email_row("theirs", "2026-10-12 10:43:15"))
+            return found
+
+        mock_log = self._sync(
+            self._gmail(("m-ours", self.thread.name)),
+            [_incoming("ours", "2026-10-12 10:43:16")],
+            find_gmail_thread=find_then_other_mailbox_appends,
+        )
+        mock_log.assert_not_called()
+        self.assertCountEqual(
+            self._rfc_ids(), ["first@x.com", "theirs@x.com", "ours@x.com"]
+        )
+
+    def test_same_email_committed_meanwhile_is_not_duplicated(self):
+        """When another mailbox's sync imports the same email first, this sync adds its user instead of a second copy."""
+
+        def find_then_other_mailbox_imports_it(thread_id, message_ids=None):
+            found = real_find_gmail_thread(thread_id, message_ids)
+            self._other_mailbox_appends(_email_row("shared", "2026-10-12 10:43:15"))
+            return found
+
+        mock_log = self._sync(
+            self._gmail(("m-shared", self.thread.name)),
+            [_incoming("shared", "2026-10-12 10:43:15")],
+            find_gmail_thread=find_then_other_mailbox_imports_it,
+        )
+        mock_log.assert_not_called()
+        self.assertEqual(self._rfc_ids().count("shared@x.com"), 1)
+        involved = frappe.get_all(
+            "Involved User", filters={"parent": self.thread.name}, pluck="account"
+        )
+        self.assertIn(TEST_USER, involved)
+
+    def test_thread_is_locked_while_incremental_sync_updates_it(self):
+        """No other sync can write the thread between the incremental sync reading and saving it."""
+        locked = []
+        self._sync(
+            self._gmail(("m-lock", self.thread.name)),
+            [_incoming("lock", "2026-10-12 10:43:16")],
+            process_attachments=lambda email, thread, obj: locked.append(
+                self._thread_is_locked(thread.name)
+            ),
+        )
+        self.assertEqual(locked, [True])
+
+    def test_thread_is_locked_while_initial_sync_updates_it(self):
+        """No other sync can write the thread between the initial sync reading and saving it."""
+        frappe.db.set_value("Gmail Account", self.account.name, "last_historyid", 0)
+        frappe.db.commit()  # nosemgrep
+        gmail = MagicMock()
+        gmail.users().threads().list.return_value.execute.return_value = {
+            "threads": [{"id": self.thread.name}]
+        }
+        gmail.users().threads().get.return_value.execute.return_value = {
+            "messages": [{"id": "m-initial-lock", "historyId": "10"}]
+        }
+        gmail.users().messages().get.return_value.execute.return_value = {
+            "labelIds": ["INBOX"]
+        }
+        locked = []
+        self._sync(
+            gmail,
+            [_incoming("initial-lock", "2026-10-12 10:43:16")],
+            process_attachments=lambda email, thread, obj: locked.append(
+                self._thread_is_locked(thread.name)
+            ),
+        )
+        self.assertEqual(locked, [True])
+
+    def test_thread_lock_is_released_before_the_next_email(self):
+        """A sync holds one thread at a time, so two syncs never wait on each other's threads (deadlock)."""
+        second = make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id=f"race-{frappe.generate_hash(length=10)}",
+            emails=[_email_row("second-first", "2026-10-12 09:00:00")],
+        )
+        frappe.db.commit()  # nosemgrep
+        first_still_locked = []
+
+        def probe(email, thread, obj):
+            if thread.name == second.name:
+                first_still_locked.append(self._thread_is_locked(self.thread.name))
+
+        self._sync(
+            self._gmail(("m-a", self.thread.name), ("m-b", second.name)),
+            [
+                _incoming("a", "2026-10-12 10:43:16"),
+                _incoming("b", "2026-10-12 10:43:17"),
+            ],
+            process_attachments=probe,
+        )
+        self.assertEqual(first_still_locked, [False])
+
+    def test_lock_timeout_retries_the_job_instead_of_logging(self):
+        """If a thread stays locked past the wait timeout, the job is retried rather than logged and skipped."""
+        with (
+            patch(
+                f"{GMAIL_THREAD_MODULE}.lock_gmail_thread",
+                side_effect=frappe.QueryTimeoutError("lock wait timeout"),
+            ),
+            patch(f"{GMAIL_THREAD_MODULE}.frappe.log_error") as mock_log,
+            self.assertRaises(frappe.RetryBackgroundJobError),
+        ):
+            self._sync(
+                self._gmail(("m-timeout", self.thread.name)),
+                [_incoming("timeout", "2026-10-12 10:43:16")],
+            )
+        mock_log.assert_not_called()
+
+    def test_retry_starts_from_the_sync_position_of_the_run(self):
+        """A label synced before the lock timeout doesn't move the position the retry starts from."""
+        account = _reset_account_for_sync(
+            last_historyid=100, labels=(("INBOX", True), ("Label_2", True))
+        )
+        frappe.db.commit()  # nosemgrep
+        gmail = MagicMock()
+
+        def history_list(**kwargs):
+            m = MagicMock()
+            messages = (
+                [{"id": "m-label-2", "threadId": self.thread.name}]
+                if kwargs["labelId"] == "Label_2"
+                else []
+            )
+            m.execute.return_value = {
+                "history": [{"messages": messages}],
+                "historyId": "500",
+            }
+            return m
+
+        gmail.users().history().list.side_effect = history_list
+        gmail.users().messages().get.return_value.execute.return_value = {
+            "labelIds": ["Label_2"]
+        }
+        with (
+            patch(
+                f"{GMAIL_THREAD_MODULE}.lock_gmail_thread",
+                side_effect=frappe.QueryTimeoutError("lock wait timeout"),
+            ),
+            self.assertRaises(frappe.RetryBackgroundJobError),
+        ):
+            self._sync(gmail, [_incoming("label-2", "2026-10-12 10:43:16")])
+        self.assertEqual(
+            frappe.db.get_value("Gmail Account", account.name, "last_historyid"), 100
+        )
+
+
+def _email_row(key, date_and_time):
+    return {
+        "gmail_message_id": f"gm-{key}-{frappe.generate_hash(length=6)}",
+        "email_message_id": f"{key}@x.com",
+        "subject": "Race",
+        "sender": "someone@example.com",
+        "date_and_time": date_and_time,
+    }
+
+
+def _incoming(key, date_and_time):
+    """The (email, email_object) pair create_new_email returns for a new message."""
+    email = frappe.new_doc("Single Email CT")
+    email.update(_email_row(key, date_and_time))
+    email_object = SimpleNamespace(
+        message_id=f"{key}@x.com",
+        from_email="someone@example.com",
+        to=[TEST_USER],
+        cc=[],
+        bcc=[],
+        mail={"References": None},
+    )
+    return email, email_object
+
+
 class TestSyncErrorHandling(_GmailThreadTestCase):
     def test_resets_last_historyid_on_history_api_not_found(self):
         """A notFound HttpError from history().list resets last_historyid to 0."""
@@ -864,6 +1131,72 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
             ):
                 sync(user=TEST_USER)
 
+    def test_initial_sync_adds_user_to_thread_imported_by_another_mailbox(self):
+        """An email another mailbox imported under its own Gmail thread id adds this mailbox's user to that thread."""
+        account = _reset_account_for_sync(last_historyid=0)
+        frappe.db.set_value("User", TEST_USER, "user_type", "System User")
+        make_test_user(TEST_USER_2)
+        key = frappe.generate_hash(length=10)
+        rfc_message_id = f"shared-{key}@x.com"
+        # imported by TEST_USER_2's mailbox, under that mailbox's thread id; the thread's
+        # Gmail Account isn't looked at, and a second one would outlive this class (sync commits)
+        other_thread = make_test_gmail_thread(
+            gmail_account=account.name,
+            gmail_thread_id=f"t-other-{key}",
+            involved_users=[TEST_USER_2],
+            emails=[
+                {
+                    "gmail_message_id": f"m-other-{key}",
+                    "email_message_id": rfc_message_id,
+                    "subject": "Shared",
+                }
+            ],
+        )
+        modified = get_datetime(other_thread.modified)
+        gmail = self._build_initial_gmail(
+            thread_id=f"t-this-{key}", message_id=f"m-this-{key}", label_ids=["INBOX"]
+        )
+        # sent to a group address: this mailbox's user isn't in the headers
+        gmail.users().threads().get.return_value.execute.return_value = {
+            "messages": [
+                {
+                    "id": f"m-this-{key}",
+                    "historyId": "10",
+                    "payload": {
+                        "headers": [
+                            {"name": "Message-ID", "value": f"<{rfc_message_id}>"},
+                            {"name": "From", "value": "someone@example.com"},
+                            {"name": "To", "value": "team@example.com"},
+                        ]
+                    },
+                }
+            ]
+        }
+        with as_user("Administrator"):
+            with (
+                change_settings(
+                    "Google Settings", enable=1, client_id="cid", client_secret="csec"
+                ),
+                patch(f"{GMAIL_THREAD_MODULE}.get_gmail_object", return_value=gmail),
+                patch(f"{GMAIL_THREAD_MODULE}.create_new_email") as mock_create,
+            ):
+                sync(user=TEST_USER)
+        mock_create.assert_not_called()
+        involved = frappe.get_all(
+            "Involved User", filters={"parent": other_thread.name}, pluck="account"
+        )
+        self.assertIn(TEST_USER, involved)
+        self.assertEqual(
+            frappe.db.count("Single Email CT", {"email_message_id": rfc_message_id}), 1
+        )
+        self.assertEqual(
+            frappe.db.get_value("Gmail Thread", other_thread.name, "modified"), modified
+        )
+        # this mailbox's later emails in its thread find the same Gmail Thread
+        self.assertEqual(
+            real_find_gmail_thread(f"t-this-{key}").name, other_thread.name
+        )
+
     def test_aggregates_involved_users_from_sender_recipients_and_account_owner(self):
         """update_involved_users is called with the set of sender + to + cc + bcc + the gmail_account's linked_user."""
         _reset_account_for_sync(last_historyid=100)
@@ -900,6 +1233,9 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
                 ),
                 patch(
                     f"{GMAIL_THREAD_MODULE}.find_gmail_thread", return_value=mock_thread
+                ),
+                patch(
+                    f"{GMAIL_THREAD_MODULE}.lock_gmail_thread", return_value=mock_thread
                 ),
                 patch(f"{GMAIL_THREAD_MODULE}.update_involved_users") as mock_uiu,
                 patch(f"{GMAIL_THREAD_MODULE}.process_attachments"),
@@ -959,6 +1295,10 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
                     ),
                     patch(
                         f"{GMAIL_THREAD_MODULE}.find_gmail_thread",
+                        return_value=mock_thread,
+                    ),
+                    patch(
+                        f"{GMAIL_THREAD_MODULE}.lock_gmail_thread",
                         return_value=mock_thread,
                     ),
                     patch(f"{GMAIL_THREAD_MODULE}.update_involved_users"),

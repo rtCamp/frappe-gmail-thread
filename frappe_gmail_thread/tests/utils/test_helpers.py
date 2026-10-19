@@ -2,10 +2,11 @@ import base64
 import json
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
+from frappe.utils import get_datetime
 
 from frappe_gmail_thread.tests import (
     TEST_USER,
@@ -21,6 +22,7 @@ from frappe_gmail_thread.utils.helpers import (
     create_new_email,
     find_gmail_thread,
     html_to_text,
+    lock_gmail_thread,
     process_attachments,
     replace_inline_images,
 )
@@ -255,6 +257,100 @@ class TestCreateNewEmail(IntegrationTestCase):
         refreshed = frappe.get_doc("Gmail Thread", thread.name)
         accounts = [u.account for u in refreshed.involved_users]
         self.assertIn(TEST_USER, accounts)
+
+    def test_adding_linked_user_keeps_thread_modified(self):
+        """Finding an already imported email adds the linked user without moving the thread's modified time."""
+        make_test_user(TEST_USER_2)
+        with as_user(TEST_USER_2):
+            other_account = make_test_gmail_account(linked_user=TEST_USER_2)
+        thread = make_test_gmail_thread(
+            gmail_account=other_account.name,
+            gmail_thread_id="keep-modified-thread",
+            involved_users=[TEST_USER_2],
+            emails=[{"gmail_message_id": "mid-keep-modified"}],
+        )
+        frappe.db.set_value(
+            "Single Email CT",
+            "mid-keep-modified",
+            "email_message_id",
+            "keep-modified@x.com",
+        )
+        last_email_at = get_datetime("2026-01-01 10:00:00")
+        frappe.db.set_value(
+            "Gmail Thread",
+            thread.name,
+            "modified",
+            last_email_at,
+            update_modified=False,
+        )
+        email = _build_email_dict(
+            msg_id="m-keep-modified", message_id="<keep-modified@x.com>"
+        )
+        email["threadId"] = "keep-modified-this-mailbox"
+        with self.assertRaises(AlreadyExistsError):
+            create_new_email(email, self.account)
+        involved = frappe.get_all(
+            "Involved User", filters={"parent": thread.name}, pluck="account"
+        )
+        self.assertIn(TEST_USER, involved)
+        self.assertEqual(
+            frappe.db.get_value("Gmail Thread", thread.name, "modified"), last_email_at
+        )
+        # this mailbox's later emails in its thread find the same Gmail Thread
+        self.assertEqual(
+            find_gmail_thread("keep-modified-this-mailbox").name, thread.name
+        )
+
+    def test_records_mailbox_thread_id_when_user_already_involved(self):
+        """The mailbox's Gmail thread id is recorded on the existing thread even if its user is already listed."""
+        thread = make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id="known-user-thread",
+            involved_users=[TEST_USER],
+            emails=[{"gmail_message_id": "mid-known-user"}],
+        )
+        frappe.db.set_value(
+            "Single Email CT", "mid-known-user", "email_message_id", "known-user@x.com"
+        )
+        email = _build_email_dict(
+            msg_id="m-known-user", message_id="<known-user@x.com>"
+        )
+        email["threadId"] = "known-user-other-thread-id"
+        with self.assertRaises(AlreadyExistsError):
+            create_new_email(email, self.account)
+        self.assertEqual(
+            find_gmail_thread("known-user-other-thread-id").name, thread.name
+        )
+
+
+class TestLockGmailThread(IntegrationTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        make_test_user(TEST_USER)
+        with as_user(TEST_USER):
+            cls.account = make_test_gmail_account(linked_user=TEST_USER)
+
+    def _lock(self, pending_writes):
+        thread = make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id=f"lock-{frappe.generate_hash(length=8)}",
+        )
+        with (
+            patch.object(frappe.db, "transaction_writes", pending_writes),
+            patch.object(frappe.db, "commit") as mock_commit,
+        ):
+            locked = lock_gmail_thread(thread.name)
+        self.assertEqual(locked.name, thread.name)
+        return mock_commit
+
+    def test_locks_from_a_new_transaction_when_nothing_is_pending(self):
+        """With nothing to keep, the lock is taken in a new transaction, so no older snapshot can conflict with it."""
+        self._lock(pending_writes=0).assert_called_once()
+
+    def test_keeps_pending_writes_in_the_transaction(self):
+        """Pending writes aren't committed early by taking the lock."""
+        self._lock(pending_writes=3).assert_not_called()
 
 
 class TestProcessAttachments(IntegrationTestCase):
