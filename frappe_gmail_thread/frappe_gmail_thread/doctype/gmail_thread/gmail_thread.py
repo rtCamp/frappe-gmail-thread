@@ -2,7 +2,9 @@
 # For license information, please see license.txt
 
 
-from email.utils import getaddresses
+import json
+from datetime import datetime, timezone
+from email.utils import getaddresses, parsedate_to_datetime
 
 import frappe
 import frappe.share
@@ -10,19 +12,43 @@ import googleapiclient.errors
 from frappe import _
 from frappe.model.document import Document
 from frappe.permissions import get_doctypes_with_read
-from frappe.utils import get_datetime, get_string_between
+from frappe.utils import cint, get_datetime, get_string_between
 
-from frappe_gmail_thread.api.oauth import get_gmail_object
+from frappe_gmail_thread.api.oauth import (
+    GmailAuthorizationExpiredError,
+    get_gmail_object,
+    handle_expired_authorization,
+)
 from frappe_gmail_thread.utils.helpers import (
     AlreadyExistsError,
+    add_thread_id_reference,
     add_thread_references,
     create_new_email,
     find_gmail_thread,
+    lock_gmail_thread,
     process_attachments,
     replace_inline_images,
 )
+from frappe_gmail_thread.utils.sync_pause import (
+    DEFAULT_PAUSE_SECONDS,
+    count_fetch_failure,
+    is_sync_paused,
+    pause_sync,
+)
 
 SCOPES = "https://www.googleapis.com/auth/gmail.readonly"
+# retried with exponential backoff by the client on 429, 5xx and 403 userRateLimitExceeded
+# or rateLimitExceeded; other rate limits (e.g. dailyLimitExceeded) pause the mailbox at once
+GMAIL_API_RETRIES = 3
+DEFAULT_MAX_THREADS_PER_LABEL = 100
+RATE_LIMIT_REASONS = {
+    "rateLimitExceeded",
+    "userRateLimitExceeded",
+    "dailyLimitExceeded",
+    "RATE_LIMIT_EXCEEDED",
+}
+# failed fetches of one message (a server error each time) before it is skipped
+MAX_FETCH_ATTEMPTS = 5
 
 
 class GmailThread(Document):
@@ -118,6 +144,23 @@ def sync_labels(account_name: str | Document, should_save: bool = True):
     gmail = get_gmail_object(gmail_account)
     labels = gmail.users().labels().list(userId="me").execute()
 
+    gmail_label_ids = {label["id"] for label in labels["labels"]}
+    deleted = [x for x in gmail_account.labels if x.label_id not in gmail_label_ids]
+    # Only when the account is saved here: inside the account's own save (a new
+    # authorization), removing rows would count as a label change and reset the sync.
+    if deleted and should_save:
+        # labels deleted in Gmail. Delete the rows directly too, so saving the
+        # account below doesn't see a label change and reset the sync
+        frappe.db.delete(
+            "Gmail Label",
+            {
+                "parent": gmail_account.name,
+                "label_id": ["in", [x.label_id for x in deleted]],
+            },
+        )
+        for row in deleted:
+            gmail_account.remove(row)
+
     available_labels = [x.label_id for x in gmail_account.labels]
 
     for label in labels["labels"]:
@@ -130,6 +173,173 @@ def sync_labels(account_name: str | Document, should_save: bool = True):
         )
     if should_save:
         gmail_account.save()
+
+
+def is_not_found_error(error: googleapiclient.errors.HttpError) -> bool:
+    details = error.error_details if isinstance(error.error_details, list) else []
+    return any(
+        isinstance(detail, dict) and detail.get("reason") == "notFound"
+        for detail in details
+    )
+
+
+def gmail_label_exists(gmail, label_id: str) -> bool:
+    try:
+        gmail.users().labels().get(userId="me", id=label_id).execute(
+            num_retries=GMAIL_API_RETRIES
+        )
+    except googleapiclient.errors.HttpError as e:
+        if is_not_found_error(e):
+            return False
+        raise
+    return True
+
+
+def is_rate_limit_error(error: Exception) -> bool:
+    """Google throttled the mailbox: a 429, or a 403 for a rate or daily limit."""
+    if not isinstance(error, googleapiclient.errors.HttpError):
+        return False
+    if error.status_code == 429:
+        return True
+    return error.status_code == 403 and bool(
+        get_error_reasons(error) & RATE_LIMIT_REASONS
+    )
+
+
+def get_error_reasons(error: googleapiclient.errors.HttpError) -> set[str]:
+    """The reasons in Google's error body, from both its `errors` and `details` lists."""
+    try:
+        body = json.loads(error.content)
+    except (TypeError, ValueError):
+        return set()
+    error_body = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error_body, dict):
+        return set()
+    return {
+        item["reason"]
+        for key in ("errors", "details")
+        for item in error_body.get(key) or []
+        if isinstance(item, dict) and item.get("reason")
+    }
+
+
+def skip_unavailable(
+    error: googleapiclient.errors.HttpError, user: str, item_id: str
+) -> bool:
+    """Whether to skip a thread or message Gmail didn't return, rather than stop the run.
+
+    One deleted since it was listed (404) is skipped. A rate limit stops the run, and so
+    does a server error until the same item has failed MAX_FETCH_ATTEMPTS times. Other
+    errors won't go away on a retry. A skipped item is logged, except a deleted one, so a
+    single item can't hold up the mailbox.
+    """
+    if error.status_code == 404:
+        return True
+    if is_rate_limit_error(error):
+        return False
+    if (
+        error.status_code >= 500
+        and count_fetch_failure(user, item_id) < MAX_FETCH_ATTEMPTS
+    ):
+        return False
+    frappe.log_error(
+        title="Gmail Thread: skipped what Gmail didn't return",
+        message=f"{user}: {item_id}\n\n{frappe.get_traceback()}",
+    )
+    return True
+
+
+def is_temporary_error(error: Exception) -> bool:
+    """Gmail can't serve the sync right now: a rate limit, or a server error left after the retries."""
+    if is_rate_limit_error(error):
+        return True
+    return (
+        isinstance(error, googleapiclient.errors.HttpError) and error.status_code >= 500
+    )
+
+
+def pause_on_temporary_error(error: Exception, user: str) -> bool:
+    """Pause the mailbox's sync when Gmail can't serve it right now; False for any other error."""
+    if not is_temporary_error(error):
+        return False
+    pause_sync(user, get_retry_after(error))
+    frappe.logger("frappe_gmail_thread").warning(
+        f"Gmail sync of {user} paused after HTTP {error.status_code}"
+    )
+    return True
+
+
+def get_retry_after(error: googleapiclient.errors.HttpError) -> int:
+    """Seconds to wait as asked by Google's Retry-After header, else a default."""
+    value = str((error.resp or {}).get("retry-after") or "").strip()
+    seconds = DEFAULT_PAUSE_SECONDS
+    if value.isdigit():
+        seconds = int(value)
+    elif value:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            seconds = int((retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError):
+            pass
+    return min(max(seconds, 60), 24 * 60 * 60)
+
+
+def get_max_threads_per_label() -> int:
+    return (
+        cint(
+            frappe.get_cached_doc("Google Settings").get(
+                "custom_gmail_max_threads_per_label"
+            )
+        )
+        or DEFAULT_MAX_THREADS_PER_LABEL
+    )
+
+
+def list_label_threads(gmail, label_id: str, limit: int) -> list[dict]:
+    """The label's newest `limit` threads, newest first, across result pages."""
+    threads = []
+    page_token = None
+    while len(threads) < limit:
+        response = (
+            gmail.users()
+            .threads()
+            .list(
+                userId="me",
+                labelIds=label_id,
+                maxResults=min(limit - len(threads), 500),
+                pageToken=page_token,
+            )
+            .execute(num_retries=GMAIL_API_RETRIES)
+        )
+        threads.extend(response.get("threads", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return threads[:limit]
+
+
+def list_label_history(gmail, label_id: str, start_history_id: int) -> dict:
+    """The label's history since `start_history_id` across result pages, with the mailbox's history id."""
+    history = []
+    page_token = None
+    while True:
+        response = (
+            gmail.users()
+            .history()
+            .list(
+                userId="me",
+                startHistoryId=start_history_id,
+                historyTypes=["messageAdded", "labelAdded"],
+                labelId=label_id,
+                maxResults=500,
+                pageToken=page_token,
+            )
+            .execute(num_retries=GMAIL_API_RETRIES)
+        )
+        history.extend(response.get("history", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            return {"history": history, "historyId": response.get("historyId")}
 
 
 def get_message_headers(message):
@@ -159,6 +369,46 @@ def get_message_participants(headers):
     return participants
 
 
+def thread_has_email(gmail_thread: Document, email: Document) -> bool:
+    return any(
+        row.gmail_message_id == email.gmail_message_id
+        or (email.email_message_id and row.email_message_id == email.email_message_id)
+        for row in gmail_thread.emails
+    )
+
+
+def get_email_participants(email_object, linked_user: str) -> set[str]:
+    return {
+        email_object.from_email,
+        *email_object.to,
+        *email_object.cc,
+        *email_object.bcc,
+        linked_user,
+    }
+
+
+def add_participants(
+    gmail_thread: Document, participants: set[str], thread_id: str | None = None
+) -> None:
+    """Add participants, and the mailbox's Gmail thread id, to an imported thread.
+
+    `modified` stays at the thread's latest email's date.
+    """
+    before = len(gmail_thread.involved_users)
+    update_involved_users(gmail_thread, participants)
+    new_reference = add_thread_id_reference(gmail_thread, thread_id)
+    if new_reference or len(gmail_thread.involved_users) != before:
+        prev_modified = gmail_thread.modified
+        gmail_thread.save(ignore_permissions=True)
+        frappe.db.set_value(
+            "Gmail Thread",
+            gmail_thread.name,
+            "modified",
+            prev_modified,
+            update_modified=False,
+        )
+
+
 def gmail_message_exists(gmail_message_id, rfc_message_id=None):
     """Return True if this message was already imported."""
     if gmail_message_id and frappe.db.exists(
@@ -176,39 +426,59 @@ def sync(user=None):
     if user:
         frappe.set_user(user)  # nosemgrep:
     user = frappe.session.user
-    gmail_account = frappe.get_doc("Gmail Account", {"linked_user": user})
-    if not gmail_account.gmail_enabled:
-        frappe.throw(_("Please configure Gmail in Email Account."))
-    if not gmail_account.refresh_token:
-        frappe.throw(
-            _("Please authorize Gmail by clicking on 'Authorize Gmail' button.")
+    if is_sync_paused(user):
+        return
+    account_name = frappe.db.get_value("Gmail Account", {"linked_user": user})
+    if not account_name:
+        return
+    gmail_account = frappe.get_doc("Gmail Account", account_name)
+    # the account can be disabled or lose its authorization while this job is queued
+    if not gmail_account.gmail_enabled or not gmail_account.refresh_token:
+        return
+    last_history_id = int(gmail_account.last_historyid or 0)
+    try:
+        gmail = get_gmail_object(gmail_account)
+        label_ids = [x.label_id for x in gmail_account.labels if x.enabled]
+        if not label_ids:
+            return
+        # Before an initial import, the mailbox's current history id: mail arriving from
+        # now on is in the history after it, so the next run continues incrementally even
+        # if this import brings nothing (an empty label, or threads Gmail won't return).
+        start_history_id = last_history_id or int(
+            gmail.users()
+            .getProfile(userId="me")
+            .execute(num_retries=GMAIL_API_RETRIES)["historyId"]
         )
-    gmail = get_gmail_object(gmail_account)
-    label_ids = [x.label_id for x in gmail_account.labels if x.enabled]
-    if not label_ids:
+    except GmailAuthorizationExpiredError:
+        handle_expired_authorization(gmail_account)
+        return
+    except googleapiclient.errors.HttpError as e:
+        if not pause_on_temporary_error(e, user):
+            raise
         return
 
     # Always store the maximum history id seen, to avoid skipping emails
-    last_history_id = int(gmail_account.last_historyid or 0)
-    max_history_id = last_history_id
+    max_history_id = start_history_id
+    max_threads = get_max_threads_per_label()
 
     for label_id in label_ids:
         try:
             if not last_history_id:
                 # Initial sync: fetch all threads for the label
-                threads = (
-                    gmail.users()
-                    .threads()
-                    .list(userId="me", labelIds=label_id)
-                    .execute()
-                )
-                if "threads" not in threads:
-                    continue
-                for thread in threads["threads"][::-1]:
+                threads = list_label_threads(gmail, label_id, max_threads)
+                for thread in threads[::-1]:
                     thread_id = thread["id"]
-                    thread_data = (
-                        gmail.users().threads().get(userId="me", id=thread_id).execute()
-                    )
+                    try:
+                        thread_data = (
+                            gmail.users()
+                            .threads()
+                            .get(userId="me", id=thread_id)
+                            .execute(num_retries=GMAIL_API_RETRIES)
+                        )
+                    except googleapiclient.errors.HttpError as e:
+                        if not skip_unavailable(e, user, f"thread {thread_id}"):
+                            raise
+                        continue
                     gmail_thread = find_gmail_thread(thread_id)
                     involved_users = set()
                     email = None
@@ -219,41 +489,31 @@ def sync(user=None):
                         msg_history_id = int(message.get("historyId", 0))
                         if msg_history_id > max_history_id:
                             max_history_id = msg_history_id
-                        if gmail_message_exists(
-                            message["id"], get_rfc_message_id(message_headers)
-                        ):
+                        rfc_message_id = get_rfc_message_id(message_headers)
+                        if gmail_message_exists(message["id"], rfc_message_id):
+                            if not gmail_thread and rfc_message_id:
+                                # thread ids are per mailbox: another mailbox may have imported it
+                                gmail_thread = find_gmail_thread(
+                                    thread_id, [rfc_message_id]
+                                )
                             if gmail_thread:
-                                gmail_thread.reload()
+                                gmail_thread = lock_gmail_thread(gmail_thread.name)
                                 participants = get_message_participants(message_headers)
                                 participants.add(gmail_account.linked_user)
-                                before = len(gmail_thread.involved_users)
-                                update_involved_users(gmail_thread, participants)
-                                if len(gmail_thread.involved_users) != before:
-                                    prev_modified = gmail_thread.modified
-                                    gmail_thread.save(ignore_permissions=True)
-                                    frappe.db.commit()  # nosemgrep
-                                    frappe.db.set_value(
-                                        "Gmail Thread",
-                                        gmail_thread.name,
-                                        "modified",
-                                        prev_modified,
-                                        update_modified=False,
-                                    )
+                                add_participants(gmail_thread, participants, thread_id)
                             continue
                         try:
                             raw_email = (
                                 gmail.users()
                                 .messages()
                                 .get(userId="me", id=message["id"], format="raw")
-                                .execute()
+                                .execute(num_retries=GMAIL_API_RETRIES)
                             )
                         except googleapiclient.errors.HttpError as e:
-                            if hasattr(e, "error_details"):
-                                for error in e.error_details:
-                                    if error.get("reason") == "notFound":
-                                        break
-                            else:
-                                raise e
+                            if not skip_unavailable(
+                                e, user, f"message {message['id']}"
+                            ):
+                                raise
                             continue
                         if "DRAFT" in raw_email.get("labelIds", []):
                             continue
@@ -263,6 +523,8 @@ def sync(user=None):
                                 raw_email, gmail_account
                             )
                         except AlreadyExistsError:
+                            # releases the thread create_new_email locked
+                            frappe.db.commit()  # nosemgrep
                             continue
                         if not gmail_thread:
                             email_message_id = email_object.message_id
@@ -278,7 +540,18 @@ def sync(user=None):
                                 thread_id, [email_message_id] + email_references
                             )
                         if gmail_thread:
-                            gmail_thread.reload()
+                            gmail_thread = lock_gmail_thread(gmail_thread.name)
+                            if thread_has_email(gmail_thread, email):
+                                # imported by another mailbox's sync while this one waited
+                                add_participants(
+                                    gmail_thread,
+                                    get_email_participants(
+                                        email_object, gmail_account.linked_user
+                                    ),
+                                    thread_id,
+                                )
+                                frappe.db.commit()  # nosemgrep
+                                continue
                         else:
                             gmail_thread = frappe.new_doc("Gmail Thread")
                             gmail_thread.gmail_thread_id = thread_id
@@ -313,30 +586,22 @@ def sync(user=None):
                         gmail_thread.append("emails", email, position=pos)
                         latest_dt = gmail_thread.emails[-1].date_and_time
                         gmail_thread.save(ignore_permissions=True)
-                        frappe.db.commit()  # nosemgrep
+                        # in the same transaction as the save, so a later failure
+                        # in this thread can't leave it with the import time
+                        thread_values = {
+                            "modified": latest_dt,
+                            "owner": gmail_account.linked_user,
+                        }
+                        if is_new_thread:
+                            thread_values["creation"] = email.date_and_time
                         frappe.db.set_value(
                             "Gmail Thread",
                             gmail_thread.name,
-                            "modified",
-                            latest_dt,
+                            thread_values,
                             update_modified=False,
                         )
-                        if is_new_thread:  # update creation date
-                            frappe.db.set_value(
-                                "Gmail Thread",
-                                gmail_thread.name,
-                                "creation",
-                                email.date_and_time,
-                                update_modified=False,
-                            )
-                        frappe.db.set_value(
-                            "Gmail Thread",
-                            gmail_thread.name,
-                            "owner",
-                            gmail_account.linked_user,
-                            modified_by=gmail_account.linked_user,
-                            update_modified=False,
-                        )
+                    # one transaction per thread: commit the thread's emails together
+                    frappe.db.commit()  # nosemgrep
                 gmail_account.reload()
                 gmail_account.last_historyid = max_history_id
                 gmail_account.save(ignore_permissions=True)
@@ -344,30 +609,29 @@ def sync(user=None):
             else:
                 # Incremental sync using history API
                 try:
-                    history = (
-                        gmail.users()
-                        .history()
-                        .list(
-                            userId="me",
-                            startHistoryId=last_history_id,
-                            historyTypes=["messageAdded", "labelAdded"],
-                            labelId=label_id,
-                        )
-                        .execute()
-                    )
+                    history = list_label_history(gmail, label_id, last_history_id)
                 except googleapiclient.errors.HttpError as e:
-                    # If notFound, update historyid to the value returned by API (if any)
-                    # You won't find history id in error, so just reset to 0 and let next sync do initial sync
-                    if hasattr(e, "error_details"):
-                        for error in e.error_details:
-                            if error.get("reason") == "notFound":
-                                gmail_account.last_historyid = 0
-                                gmail_account.save(ignore_permissions=True)
-                                frappe.db.commit()
-                                return
-                    raise e
+                    if not is_not_found_error(e):
+                        raise e
+                    if not gmail_label_exists(gmail, label_id):
+                        # deleted in Gmail. Delete the row directly: saving the
+                        # account with changed labels would reset the whole sync
+                        frappe.db.delete(
+                            "Gmail Label",
+                            {"parent": gmail_account.name, "label_id": label_id},
+                        )
+                        # release the rows now: saving the account locks its labels
+                        frappe.db.commit()  # nosemgrep
+                        continue
+                    # The label exists, so startHistoryId is too old. The error
+                    # carries no newer history id: reset to 0 for an initial sync
+                    gmail_account.reload()
+                    gmail_account.last_historyid = 0
+                    gmail_account.save(ignore_permissions=True)
+                    frappe.db.commit()
+                    return
 
-                new_history_id = int(history.get("historyId", last_history_id))
+                new_history_id = int(history["historyId"] or last_history_id)
                 if new_history_id > max_history_id:
                     max_history_id = new_history_id
                 updated_docs = set()
@@ -379,15 +643,13 @@ def sync(user=None):
                                     gmail.users()
                                     .messages()
                                     .get(userId="me", id=message["id"], format="raw")
-                                    .execute()
+                                    .execute(num_retries=GMAIL_API_RETRIES)
                                 )
                             except googleapiclient.errors.HttpError as e:
-                                if hasattr(e, "error_details"):
-                                    for error in e.error_details:
-                                        if error.get("reason") == "notFound":
-                                            break
-                                else:
-                                    raise e
+                                if not skip_unavailable(
+                                    e, user, f"message {message['id']}"
+                                ):
+                                    raise
                                 continue
                             if "DRAFT" in raw_email.get("labelIds", []):
                                 continue
@@ -400,6 +662,8 @@ def sync(user=None):
                                     raw_email, gmail_account
                                 )
                             except AlreadyExistsError:
+                                # releases the thread create_new_email locked
+                                frappe.db.commit()  # nosemgrep
                                 continue
                             if not gmail_thread:
                                 email_message_id = email_object.message_id
@@ -414,7 +678,20 @@ def sync(user=None):
                                 gmail_thread = find_gmail_thread(
                                     thread_id, [email_message_id] + email_references
                                 )
-                            if not gmail_thread:
+                            if gmail_thread:
+                                gmail_thread = lock_gmail_thread(gmail_thread.name)
+                                if thread_has_email(gmail_thread, email):
+                                    # imported by another mailbox's sync while this one waited
+                                    add_participants(
+                                        gmail_thread,
+                                        get_email_participants(
+                                            email_object, gmail_account.linked_user
+                                        ),
+                                        thread_id,
+                                    )
+                                    frappe.db.commit()  # nosemgrep
+                                    continue
+                            else:
                                 gmail_thread = frappe.new_doc("Gmail Thread")
                                 gmail_thread.gmail_thread_id = thread_id
                                 gmail_thread.gmail_account = gmail_account.name
@@ -463,6 +740,8 @@ def sync(user=None):
                                     email.date_and_time,
                                     update_modified=False,
                                 )
+                            # don't keep the thread locked for the rest of the label
+                            frappe.db.commit()  # nosemgrep
                             if (
                                 gmail_thread.reference_doctype
                                 and gmail_thread.reference_name
@@ -484,7 +763,34 @@ def sync(user=None):
                             doctype=doctype,
                             docname=docname,
                         )
-        except Exception:
+        except (frappe.QueryDeadlockError, frappe.QueryTimeoutError) as e:
+            # A thread stayed locked by another sync: retry the whole job instead of
+            # skipping this label's remaining emails. The retry starts from the sync
+            # position this run started from, as labels done earlier in the run have
+            # moved it past emails of the labels not reached yet.
+            frappe.db.rollback()
+            frappe.db.set_value(
+                "Gmail Account",
+                gmail_account.name,
+                "last_historyid",
+                last_history_id,
+                update_modified=False,
+            )
+            # the job runner rolls back before retrying
+            frappe.db.commit()  # nosemgrep
+            raise frappe.RetryBackgroundJobError from e
+        except Exception as e:
+            if pause_on_temporary_error(e, user):
+                # Go back to the sync position this run started from, as labels
+                # already done may have moved it past emails of the labels not reached yet.
+                frappe.db.set_value(
+                    "Gmail Account",
+                    gmail_account.name,
+                    "last_historyid",
+                    last_history_id,
+                    update_modified=False,
+                )
+                return
             frappe.log_error(frappe.get_traceback(), "Gmail Thread Sync Error")
             continue
 

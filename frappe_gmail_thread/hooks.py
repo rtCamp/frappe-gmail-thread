@@ -89,7 +89,7 @@ additional_timeline_content = {
 # ------------
 
 # before_install = "frappe_gmail_thread.install.before_install"
-# after_install = "frappe_gmail_thread.install.after_install"
+after_install = "frappe_gmail_thread.install.after_install"
 
 # Uninstallation
 # ------------
@@ -146,11 +146,11 @@ extend_doctype_class = {
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"Communication": {
-# 		"after_insert": "frappe_gmail_thread.doc_events.communication.after_insert",
-# 	},
-# }
+doc_events = {
+    "Google Settings": {
+        "on_update": "frappe_gmail_thread.doc_events.google_settings.on_update",
+    },
+}
 
 # Fixtures
 # ----------
@@ -186,7 +186,10 @@ scheduler_events = {
     # 	"all": [
     # 		"frappe_gmail_thread.tasks.all"
     # 	],
-    "daily": ["frappe_gmail_thread.tasks.daily.enable_pubsub_everyday"],
+    "daily": [
+        "frappe_gmail_thread.tasks.daily.enable_pubsub_everyday",
+        "frappe_gmail_thread.tasks.daily.send_reauthorization_reminders",
+    ],
     # 	"hourly": [
     # 		"frappe_gmail_thread.tasks.hourly"
     # 	],

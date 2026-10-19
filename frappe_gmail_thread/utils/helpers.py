@@ -6,6 +6,7 @@ from uuid import uuid4
 import frappe
 from bs4 import BeautifulSoup
 from frappe.email.receive import Email, MaxFileSizeReachedError
+from frappe.model.document import Document
 from frappe.utils import extract_email_id, sanitize_html
 
 
@@ -197,6 +198,38 @@ def add_thread_references(
         )
 
 
+def add_thread_id_reference(gmail_thread, thread_id) -> bool:
+    """Record a mailbox's Gmail thread id on a thread it didn't create; True if it was added.
+
+    Gmail thread ids are per mailbox. With the reference, find_gmail_thread() resolves that
+    mailbox's later emails to this thread, including ones without References headers.
+    """
+    if not thread_id or thread_id == gmail_thread.gmail_thread_id:
+        return False
+    if any(row.reference_id == thread_id for row in gmail_thread.references or []):
+        return False
+    gmail_thread.append(
+        "references", {"reference_id": thread_id, "reference_type": "Thread-ID"}
+    )
+    return True
+
+
+def lock_gmail_thread(name: str) -> Document:
+    """Load the thread with its row locked until the next commit.
+
+    Syncs of different mailboxes update the same thread. A copy read before
+    another sync's commit fails the timestamp check on save, so every update
+    starts from a locked, current copy and commits right after saving.
+    """
+    if not frappe.db.transaction_writes:
+        # Start from a new transaction. With snapshot isolation (MariaDB >= 11.6.2),
+        # locking a row another sync changed after this transaction's first read
+        # fails instead of waiting for it. With writes pending, this sync already
+        # holds the thread it is working on.
+        frappe.db.commit()  # nosemgrep
+    return frappe.get_doc("Gmail Thread", name, for_update=True)
+
+
 class AlreadyExistsError(Exception):
     pass
 
@@ -223,17 +256,30 @@ def create_new_email(email, gmail_account):
             "Single Email CT", {"email_message_id": email_object.message_id}
         )
         if email_ct:
-            gmail_thread = frappe.get_doc("Gmail Thread", email_ct.parent)
+            # locked, as concurrent syncs of other mailboxes update this thread
+            gmail_thread = lock_gmail_thread(email_ct.parent)
             involved_users_linked = [
                 user.account for user in gmail_thread.involved_users
             ]
 
+            changed = add_thread_id_reference(gmail_thread, email.get("threadId"))
             if gmail_account.linked_user not in involved_users_linked:
                 involved_user = frappe.get_doc(
                     doctype="Involved User", account=gmail_account.linked_user
                 )
                 gmail_thread.append("involved_users", involved_user)
+                changed = True
+            if changed:
+                # keep `modified` at the latest email's date: no new email was added
+                prev_modified = gmail_thread.modified
                 gmail_thread.save(ignore_permissions=True)
+                frappe.db.set_value(
+                    "Gmail Thread",
+                    gmail_thread.name,
+                    "modified",
+                    prev_modified,
+                    update_modified=False,
+                )
 
             raise AlreadyExistsError
     except frappe.DoesNotExistError:
@@ -316,7 +362,9 @@ def process_attachments(new_email, gmail_thread, email_object):
                     "content": attachment["fcontent"],
                 }
             )
-            _file.save()
+            # imported by the mailbox's own sync: the thread may not be saved
+            # yet, or not list this user yet, which the attach check rejects
+            _file.save(ignore_permissions=True)
             attachments.append(
                 {
                     "file_name": _file.file_name,

@@ -1,8 +1,9 @@
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, change_settings
+from frappe.utils import now_datetime
 
 from frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_account.gmail_account import (
     sync_labels_api,
@@ -11,6 +12,7 @@ from frappe_gmail_thread.tests import (
     TEST_USER,
     as_user,
     make_test_gmail_account,
+    make_test_gmail_thread,
     make_test_user,
     set_password_field,
 )
@@ -18,6 +20,7 @@ from frappe_gmail_thread.tests import (
 GMAIL_ACCOUNT_MODULE = (
     "frappe_gmail_thread.frappe_gmail_thread.doctype.gmail_account.gmail_account"
 )
+OAUTH_MODULE = "frappe_gmail_thread.api.oauth"
 
 
 class _GmailAccountTestCase(IntegrationTestCase):
@@ -128,43 +131,80 @@ class TestGmailAccountValidate(_GmailAccountTestCase):
             account.validate()  # no exception expected
 
 
-class TestGmailAccountOnTrash(_GmailAccountTestCase):
+class TestGmailAccountAfterDelete(_GmailAccountTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         make_test_user(TEST_USER)
 
-    def test_calls_disable_pubsub_when_enabled_with_token_and_topic(self):
-        """on_trash invokes disable_pubsub when all three preconditions are met."""
+    def test_stops_watch_while_realtime_enabled(self):
+        """Deleting an authorized account stops its Gmail watch while real-time sync is on."""
         account = _reset_account(gmail_enabled=1, refresh_token="rt")
-        with change_settings("Google Settings", custom_gmail_pubsub_topic="topic"):
-            with patch(f"{GMAIL_ACCOUNT_MODULE}.disable_pubsub") as mock_disable:
-                account.on_trash()
-        mock_disable.assert_called_once()
+        gmail = MagicMock()
+        with change_settings(
+            "Google Settings",
+            custom_gmail_sync_in_realtime=1,
+            custom_gmail_pubsub_topic="topic",
+        ):
+            with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
+                account.after_delete()
+        gmail.users().stop.assert_called_once_with(userId="me")
 
-    def test_returns_silently_when_not_enabled(self):
-        """on_trash does nothing when gmail_enabled=0."""
+    def test_stops_watch_of_disabled_account(self):
+        """Deleting a disabled but authorized account still stops its watch, whatever the topic setting."""
         account = _reset_account(gmail_enabled=0, refresh_token="rt")
-        with change_settings("Google Settings", custom_gmail_pubsub_topic="topic"):
-            with patch(f"{GMAIL_ACCOUNT_MODULE}.disable_pubsub") as mock_disable:
-                account.on_trash()
-        mock_disable.assert_not_called()
-
-    def test_returns_silently_when_no_refresh_token(self):
-        """on_trash does nothing when refresh_token is empty."""
-        account = _reset_account(gmail_enabled=1, refresh_token=None)
-        with change_settings("Google Settings", custom_gmail_pubsub_topic="topic"):
-            with patch(f"{GMAIL_ACCOUNT_MODULE}.disable_pubsub") as mock_disable:
-                account.on_trash()
-        mock_disable.assert_not_called()
-
-    def test_returns_silently_when_no_pubsub_topic(self):
-        """on_trash does nothing when Google Settings has no pubsub topic configured."""
-        account = _reset_account(gmail_enabled=1, refresh_token="rt")
+        gmail = MagicMock()
         with change_settings("Google Settings", custom_gmail_pubsub_topic=""):
-            with patch(f"{GMAIL_ACCOUNT_MODULE}.disable_pubsub") as mock_disable:
-                account.on_trash()
-        mock_disable.assert_not_called()
+            with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
+                account.after_delete()
+        gmail.users().stop.assert_called_once_with(userId="me")
+
+    def test_no_api_call_without_refresh_token(self):
+        """Deleting an account that was never authorized makes no Gmail API call."""
+        account = _reset_account(gmail_enabled=1, refresh_token=None)
+        with patch(f"{OAUTH_MODULE}.get_gmail_object") as mock_get:
+            account.after_delete()
+        mock_get.assert_not_called()
+
+    def test_delete_succeeds_when_stop_fails(self):
+        """A mailbox whose access was revoked can still be deleted: the stop failure is logged."""
+        account = _reset_account(gmail_enabled=1, refresh_token="rt")
+        with (
+            patch(
+                f"{OAUTH_MODULE}.get_gmail_object", side_effect=RuntimeError("revoked")
+            ),
+            patch(f"{OAUTH_MODULE}.frappe.log_error") as mock_log,
+        ):
+            account.after_delete()
+        mock_log.assert_called_once()
+
+    def test_refused_delete_keeps_watch(self):
+        """A delete refused because synced threads link to the account leaves its watch running."""
+        account = _reset_account(gmail_enabled=1, refresh_token="rt")
+        make_test_gmail_thread(
+            gmail_account=account.name,
+            gmail_thread_id=f"delete-link-{frappe.generate_hash(length=8)}",
+        )
+        gmail = MagicMock()
+        with (
+            patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail),
+            self.assertRaises(frappe.LinkExistsError),
+        ):
+            frappe.delete_doc("Gmail Account", account.name)
+        gmail.users().stop.assert_not_called()
+
+    def test_delete_stops_watch(self):
+        """Deleting an account without synced threads stops its watch."""
+        user = "test_fgt_delete_watch@example.com"
+        make_test_user(user)
+        with as_user(user):
+            account = make_test_gmail_account(linked_user=user)
+        set_password_field("Gmail Account", account.name, "refresh_token", "rt")
+        gmail = MagicMock()
+        with patch(f"{OAUTH_MODULE}.get_gmail_object", return_value=gmail):
+            frappe.delete_doc("Gmail Account", account.name)
+        gmail.users().stop.assert_called_once_with(userId="me")
+        self.assertFalse(frappe.db.exists("Gmail Account", account.name))
 
 
 class TestGmailAccountBeforeSave(_GmailAccountTestCase):
@@ -225,6 +265,109 @@ class TestGmailAccountBeforeSave(_GmailAccountTestCase):
                 account.save(ignore_permissions=True)
         mock_disable.assert_called()
         mock_enable.assert_not_called()
+
+    def test_new_authorization_ends_reauthorization_reminders(self):
+        """Authorizing Gmail again clears the recorded expiry, which stops the reminder emails."""
+        account = _reset_account(gmail_enabled=0)
+        frappe.db.set_value(
+            "Gmail Account",
+            account.name,
+            {
+                "authorization_expired_on": now_datetime(),
+                "reauthorization_email_sent_on": now_datetime(),
+            },
+            update_modified=False,
+        )
+        account.reload()
+        account.refresh_token = "new-token"
+        with change_settings("Google Settings", custom_gmail_sync_in_realtime=0):
+            with patch(f"{GMAIL_ACCOUNT_MODULE}.sync_labels"):
+                account.save(ignore_permissions=True)
+        self.assertEqual(
+            frappe.db.get_value(
+                "Gmail Account",
+                account.name,
+                ["authorization_expired_on", "reauthorization_email_sent_on"],
+            ),
+            (None, None),
+        )
+
+    def test_unticking_gmail_enabled_stops_watch(self):
+        """Saving an account with Gmail Enabled unticked stops its Gmail watch."""
+        account = _reset_account(gmail_enabled=1, refresh_token="rt")
+        account.gmail_enabled = 0
+        with patch(f"{GMAIL_ACCOUNT_MODULE}.disable_pubsub") as mock_disable:
+            account.save(ignore_permissions=True)
+        mock_disable.assert_called_once_with(account)
+
+    def _realtime_settings(self, realtime=1):
+        return change_settings(
+            "Google Settings",
+            enable=1,
+            client_id="cid",
+            client_secret="csec",
+            custom_gmail_sync_in_realtime=realtime,
+            custom_gmail_pubsub_topic="topic",
+        )
+
+    def test_reticking_gmail_enabled_starts_watch_again(self):
+        """Unticking Gmail Enabled stops the watch, and ticking it again starts it with the same authorization."""
+        account = _reset_account(gmail_enabled=1, refresh_token="rt")
+        with (
+            self._realtime_settings(),
+            patch(f"{GMAIL_ACCOUNT_MODULE}.disable_pubsub") as mock_disable,
+            patch(f"{GMAIL_ACCOUNT_MODULE}.enable_pubsub") as mock_enable,
+        ):
+            account.gmail_enabled = 0
+            account.save(ignore_permissions=True)
+            mock_disable.assert_called_once()
+            mock_enable.assert_not_called()
+
+            account.gmail_enabled = 1
+            account.save(ignore_permissions=True)
+        mock_enable.assert_called_once_with(account)
+        mock_disable.assert_called_once()
+
+    def test_reticking_gmail_enabled_without_realtime_sync_starts_no_watch(self):
+        """With real-time sync off, ticking Gmail Enabled starts no watch."""
+        account = _reset_account(gmail_enabled=0, refresh_token="rt")
+        account.gmail_enabled = 1
+        with (
+            self._realtime_settings(realtime=0),
+            patch(f"{GMAIL_ACCOUNT_MODULE}.enable_pubsub") as mock_enable,
+        ):
+            account.save(ignore_permissions=True)
+        mock_enable.assert_not_called()
+
+    def test_reticking_gmail_enabled_saves_when_watch_fails(self):
+        """A watch that can't be started is logged; the account is still enabled."""
+        account = _reset_account(gmail_enabled=0, refresh_token="rt")
+        account.gmail_enabled = 1
+        with (
+            self._realtime_settings(),
+            patch(
+                f"{GMAIL_ACCOUNT_MODULE}.enable_pubsub",
+                side_effect=frappe.ValidationError("revoked"),
+            ),
+            patch(f"{GMAIL_ACCOUNT_MODULE}.frappe.log_error") as mock_log,
+        ):
+            account.save(ignore_permissions=True)
+        mock_log.assert_called_once()
+        self.assertEqual(
+            frappe.db.get_value("Gmail Account", account.name, "gmail_enabled"), 1
+        )
+
+    def test_saving_enabled_account_does_not_stop_watch(self):
+        """Saving an account that stays enabled leaves its Gmail watch alone."""
+        account = _reset_account(gmail_enabled=1, refresh_token="rt")
+        with (
+            change_settings(
+                "Google Settings", enable=1, client_id="cid", client_secret="csec"
+            ),
+            patch(f"{GMAIL_ACCOUNT_MODULE}.disable_pubsub") as mock_disable,
+        ):
+            account.save(ignore_permissions=True)
+        mock_disable.assert_not_called()
 
     def test_labels_change_resets_last_historyid(self):
         """When labels child table changes, last_historyid is reset to 0."""
