@@ -5,6 +5,7 @@ import frappe
 from frappe.utils.background_jobs import is_job_enqueued
 
 from frappe_gmail_thread.utils.queues import get_gmail_thread_sync_queue_name
+from frappe_gmail_thread.utils.sync_pause import is_sync_paused
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])  # nosemgrep
@@ -34,6 +35,8 @@ def callback():
             "User", {"email": email_address, "user_type": "System User", "enabled": 1}
         )
         if not user:
+            return "OK"
+        if is_sync_paused(user):
             return "OK"
         history_id = message.get("historyId")
         gmail_account = frappe.db.get_value(

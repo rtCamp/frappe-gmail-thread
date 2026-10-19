@@ -11,6 +11,7 @@ from frappe_gmail_thread.tests import (
     make_test_user,
     set_password_field,
 )
+from frappe_gmail_thread.utils.sync_pause import pause_sync
 
 SYNC_TASK_MODULE = "frappe_gmail_thread.tasks.sync"
 
@@ -60,3 +61,22 @@ class TestSyncEmails(IntegrationTestCase):
         ):
             sync_emails()
         mock_enqueue.assert_not_called()
+
+    def test_skips_mailbox_paused_by_a_rate_limit(self):
+        """sync_emails doesn't queue a sync for a mailbox Gmail asked to back off."""
+        make_test_user(TEST_USER)
+        with as_user(TEST_USER):
+            account = make_test_gmail_account(linked_user=TEST_USER)
+        frappe.db.set_value("Gmail Account", account.name, "gmail_enabled", 1)
+        set_password_field("Gmail Account", account.name, "refresh_token", "rt")
+        pause_sync(TEST_USER, 60)
+        self.addCleanup(
+            frappe.cache.delete_value, f"gmail_thread_sync_paused:{TEST_USER}"
+        )
+        with (
+            patch(f"{SYNC_TASK_MODULE}.is_job_enqueued", return_value=False),
+            patch(f"{SYNC_TASK_MODULE}.frappe.enqueue") as mock_enqueue,
+        ):
+            sync_emails()
+        enqueued_for = {c.kwargs["user"] for c in mock_enqueue.call_args_list}
+        self.assertNotIn(TEST_USER, enqueued_for)
