@@ -91,6 +91,10 @@ additional_timeline_content = {
 # before_install = "frappe_gmail_thread.install.before_install"
 after_install = "frappe_gmail_thread.install.after_install"
 
+# Custom fields live in setup/custom_fields.json. create_custom_fields(..., update=True)
+# is idempotent, so it is safe to run on every migrate.
+after_migrate = "frappe_gmail_thread.setup.install"
+
 # Uninstallation
 # ------------
 
@@ -155,17 +159,8 @@ doc_events = {
 # Fixtures
 # ----------
 
+# Custom fields are installed from setup/custom_fields.json (see after_migrate).
 fixtures = [
-    {
-        "dt": "Custom Field",
-        "filters": [
-            [
-                "module",
-                "in",
-                ["Frappe Gmail Thread"],
-            ]
-        ],
-    },
     # TODO: Q: Should we export permissions?
     # {
     #     "dt": "Custom DocPerm",
