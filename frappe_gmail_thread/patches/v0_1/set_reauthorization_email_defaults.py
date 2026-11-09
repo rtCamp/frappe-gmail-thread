@@ -1,12 +1,12 @@
 import frappe
 
+from frappe_gmail_thread.setup import install_custom_fields
 from frappe_gmail_thread.utils.reauthorization import (
     DEFAULT_REMINDER_DAYS,
     EMAIL_TEMPLATE_FIELD,
     REMINDER_DAYS_FIELD,
     make_default_email_template,
 )
-from frappe_gmail_thread.setup import install_custom_fields
 
 
 def execute() -> None:
