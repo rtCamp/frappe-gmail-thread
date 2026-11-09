@@ -11,7 +11,7 @@ FIELD = "custom_gmail_max_threads_per_label"
 def execute():
     # A Single that already exists doesn't get a new field's default, and saving
     # it stores 0, so the form would show 0 while the sync uses the default. Read
-    # Singles directly: the field itself is created by fixtures, synced after this.
+    # Singles directly: the field itself is created by after_migrate, which runs after this.
     singles = frappe.qb.DocType("Singles")
     stored = (
         frappe.qb.from_(singles)

@@ -11,7 +11,7 @@ from frappe_gmail_thread.utils.reauthorization import (
 def execute():
     # A Single that already exists doesn't get new fields' defaults, and an unset Int
     # reads as 0, which turns reminders off. Read Singles directly: the fields
-    # themselves are created by fixtures, synced after this. A stored 0 is a choice.
+    # themselves are created by after_migrate, which runs after this. A stored 0 is a choice.
     singles = frappe.qb.DocType("Singles")
     stored = dict(
         frappe.qb.from_(singles)

@@ -1,0 +1,51 @@
+{
+  "Google Settings": [
+    {
+      "fieldname": "custom_gmail_settings",
+      "fieldtype": "Section Break",
+      "insert_after": "app_id",
+      "label": "Gmail Settings"
+    },
+    {
+      "default": "100",
+      "description": "Newest threads per label imported when a mailbox is synced from the start.",
+      "fieldname": "custom_gmail_max_threads_per_label",
+      "fieldtype": "Int",
+      "insert_after": "custom_gmail_settings",
+      "label": "Max Threads per Label",
+      "non_negative": 1
+    },
+    {
+      "default": "3",
+      "description": "Days between emails reminding a user to authorize Gmail again after their authorization expires. 0 turns reminders off.",
+      "fieldname": "custom_gmail_reauthorization_reminder_days",
+      "fieldtype": "Int",
+      "insert_after": "custom_gmail_max_threads_per_label",
+      "label": "Re-authorization Reminder Interval (Days)",
+      "non_negative": 1
+    },
+    {
+      "description": "Email sent when a Gmail authorization expires, and as its reminders. Leave empty to use the built-in email.",
+      "fieldname": "custom_gmail_reauthorization_email_template",
+      "fieldtype": "Link",
+      "insert_after": "custom_gmail_reauthorization_reminder_days",
+      "label": "Re-authorization Email Template",
+      "options": "Email Template"
+    },
+    {
+      "fieldname": "custom_gmail_sync_in_realtime",
+      "fieldtype": "Check",
+      "insert_after": "custom_gmail_reauthorization_email_template",
+      "label": "Sync in Realtime"
+    },
+    {
+      "depends_on": "eval:doc.custom_gmail_sync_in_realtime == true;",
+      "fieldname": "custom_gmail_pubsub_topic",
+      "fieldtype": "Data",
+      "insert_after": "custom_gmail_sync_in_realtime",
+      "label": "PubSub Topic",
+      "mandatory_depends_on": "eval:doc.custom_gmail_sync_in_realtime == true;",
+      "translatable": 1
+    }
+  ]
+}
