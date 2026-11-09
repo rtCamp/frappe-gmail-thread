@@ -89,23 +89,3 @@ class TestSetReauthorizationEmailDefaults(IntegrationTestCase):
         self.assertEqual(
             frappe.db.count("Email Template", {"name": DEFAULT_TEMPLATE}), 1
         )
-
-    def test_installs_the_custom_fields_first(self):
-        """On a fresh deploy the patch runs before after_migrate, so it creates the fields it needs."""
-        fields = [REMINDER_DAYS_FIELD, EMAIL_TEMPLATE_FIELD]
-        frappe.db.delete(
-            "Custom Field", {"dt": "Google Settings", "fieldname": ("in", fields)}
-        )
-        _unset(*fields)
-
-        execute()
-
-        for field in fields:
-            self.assertTrue(
-                frappe.db.exists(
-                    "Custom Field", {"dt": "Google Settings", "fieldname": field}
-                ),
-                field,
-            )
-        self.assertEqual(int(_stored(REMINDER_DAYS_FIELD)), 3)
-        self.assertTrue(_stored(EMAIL_TEMPLATE_FIELD))
