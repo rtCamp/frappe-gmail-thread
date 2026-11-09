@@ -6,12 +6,17 @@ from frappe_gmail_thread.utils.reauthorization import (
     REMINDER_DAYS_FIELD,
     make_default_email_template,
 )
+from frappe_gmail_thread.setup import install_custom_fields
 
 
-def execute():
+def execute() -> None:
+    # Patch may run before `after_migrate` installs the custom fields on a
+    # fresh deploy — install them first so the fields exist.
+    install_custom_fields()
+
     # A Single that already exists doesn't get new fields' defaults, and an unset Int
-    # reads as 0, which turns reminders off. Read Singles directly: the fields
-    # themselves are created by after_migrate, which runs after this. A stored 0 is a choice.
+    # reads as 0, which turns reminders off. Read Singles directly to tell an unset
+    # value from a stored one. A stored 0 is a choice.
     singles = frappe.qb.DocType("Singles")
     stored = dict(
         frappe.qb.from_(singles)

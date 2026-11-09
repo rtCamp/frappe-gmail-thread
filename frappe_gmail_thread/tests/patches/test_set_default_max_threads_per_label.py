@@ -36,3 +36,15 @@ class TestSetDefaultMaxThreadsPerLabel(IntegrationTestCase):
         frappe.db.set_single_value("Google Settings", FIELD, 250, update_modified=False)
         execute()
         self.assertEqual(int(_stored()), 250)
+
+    def test_installs_the_custom_field_first(self):
+        """On a fresh deploy the patch runs before after_migrate, so it creates the field it needs."""
+        frappe.db.delete("Custom Field", {"dt": "Google Settings", "fieldname": FIELD})
+        frappe.db.delete("Singles", {"doctype": "Google Settings", "field": FIELD})
+
+        execute()
+
+        self.assertTrue(
+            frappe.db.exists("Custom Field", {"dt": "Google Settings", "fieldname": FIELD})
+        )
+        self.assertEqual(int(_stored()), 100)
