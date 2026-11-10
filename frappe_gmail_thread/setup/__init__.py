@@ -14,9 +14,6 @@ def install() -> None:
 def install_custom_fields() -> None:
     """Install / refresh custom fields from custom_fields.json."""
     data_file = Path(__file__).parent / "custom_fields.json"
+    # Each entry declares "module" so /desk/custom-field shows which app owns it.
     custom_fields: dict[str, list[dict]] = json.loads(data_file.read_text())
-    # Owner tag so /desk/custom-field shows which app created these fields.
-    for fields in custom_fields.values():
-        for df in fields:
-            df.setdefault("module", MODULE)
     create_custom_fields(custom_fields, update=True)

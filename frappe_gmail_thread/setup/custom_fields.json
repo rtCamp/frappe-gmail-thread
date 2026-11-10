@@ -4,7 +4,8 @@
       "fieldname": "custom_gmail_settings",
       "fieldtype": "Section Break",
       "insert_after": "app_id",
-      "label": "Gmail Settings"
+      "label": "Gmail Settings",
+      "module": "Frappe Gmail Thread"
     },
     {
       "default": "100",
@@ -13,6 +14,7 @@
       "fieldtype": "Int",
       "insert_after": "custom_gmail_settings",
       "label": "Max Threads per Label",
+      "module": "Frappe Gmail Thread",
       "non_negative": 1
     },
     {
@@ -22,6 +24,7 @@
       "fieldtype": "Int",
       "insert_after": "custom_gmail_max_threads_per_label",
       "label": "Re-authorization Reminder Interval (Days)",
+      "module": "Frappe Gmail Thread",
       "non_negative": 1
     },
     {
@@ -30,13 +33,15 @@
       "fieldtype": "Link",
       "insert_after": "custom_gmail_reauthorization_reminder_days",
       "label": "Re-authorization Email Template",
+      "module": "Frappe Gmail Thread",
       "options": "Email Template"
     },
     {
       "fieldname": "custom_gmail_sync_in_realtime",
       "fieldtype": "Check",
       "insert_after": "custom_gmail_reauthorization_email_template",
-      "label": "Sync in Realtime"
+      "label": "Sync in Realtime",
+      "module": "Frappe Gmail Thread"
     },
     {
       "depends_on": "eval:doc.custom_gmail_sync_in_realtime == true;",
@@ -45,6 +50,7 @@
       "insert_after": "custom_gmail_sync_in_realtime",
       "label": "PubSub Topic",
       "mandatory_depends_on": "eval:doc.custom_gmail_sync_in_realtime == true;",
+      "module": "Frappe Gmail Thread",
       "translatable": 1
     }
   ]
