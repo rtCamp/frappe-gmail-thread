@@ -28,6 +28,8 @@ app_license = "agpl-3.0"
 # app_include_css = "/assets/frappe_gmail_thread/css/frappe_gmail_thread.css"
 app_include_js = ["/assets/frappe_gmail_thread/js/activity.js"]
 
+doctype_js = {"Google Settings": "public/js/google_settings.js"}
+
 additional_timeline_content = {
     "*": ["frappe_gmail_thread.api.activity.get_linked_gmail_threads"],
 }
