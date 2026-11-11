@@ -169,7 +169,7 @@ class TestFindGmailThread(IntegrationTestCase):
             gmail_thread_id="find-by-thread-id",
         )
         result = find_gmail_thread("find-by-thread-id")
-        self.assertEqual(result.name, thread.name)
+        self.assertEqual(result, thread.name)
 
     def test_walks_message_ids_when_thread_id_missing(self):
         """When no thread matches the thread_id, find_gmail_thread walks the message_ids and returns the parent thread of any matching Single Email CT."""
@@ -184,12 +184,69 @@ class TestFindGmailThread(IntegrationTestCase):
             "Single Email CT", "mid-001", "email_message_id", "<msg-001@x.com>"
         )
         result = find_gmail_thread("no-such-thread", ["<msg-001@x.com>"])
-        self.assertEqual(result.name, thread.name)
+        self.assertEqual(result, thread.name)
 
     def test_returns_none_when_no_match(self):
         """find_gmail_thread returns None when neither the thread_id nor any message_id matches."""
         result = find_gmail_thread("nonexistent", ["no-such@msg.com"])
         self.assertIsNone(result)
+
+    def test_returns_thread_by_reference(self) -> None:
+        """A Gmail Thread Reference matching a message_id resolves to its thread's name."""
+        thread = make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id="find-by-reference",
+        )
+        thread.append(
+            "references",
+            {"reference_id": "ref-msg@x.com", "reference_type": "Message-ID"},
+        )
+        thread.save(ignore_permissions=True)
+        result = find_gmail_thread("other-mailbox-thread-id", ["ref-msg@x.com"])
+        self.assertEqual(result, thread.name)
+
+    def test_follows_message_id_order(self) -> None:
+        """When message_ids match emails in different threads, the earliest id in the list wins."""
+        first = make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id="find-order-first",
+            emails=[{"gmail_message_id": "mid-order-first"}],
+        )
+        second = make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id="find-order-second",
+            emails=[{"gmail_message_id": "mid-order-second"}],
+        )
+        frappe.db.set_value(
+            "Single Email CT", "mid-order-first", "email_message_id", "order-1@x.com"
+        )
+        frappe.db.set_value(
+            "Single Email CT", "mid-order-second", "email_message_id", "order-2@x.com"
+        )
+        self.assertEqual(
+            find_gmail_thread("no-such-thread", ["order-2@x.com", "order-1@x.com"]),
+            second.name,
+        )
+        self.assertEqual(
+            find_gmail_thread("no-such-thread", ["order-1@x.com", "order-2@x.com"]),
+            first.name,
+        )
+
+    def test_does_not_load_documents(self) -> None:
+        """Every lookup path reads only names: no Gmail Thread or Single Email CT document is loaded."""
+        make_test_gmail_thread(
+            gmail_account=self.account.name,
+            gmail_thread_id="find-no-load",
+            emails=[{"gmail_message_id": "mid-no-load"}],
+        )
+        frappe.db.set_value(
+            "Single Email CT", "mid-no-load", "email_message_id", "no-load@x.com"
+        )
+        with patch("frappe_gmail_thread.utils.helpers.frappe.get_doc") as get_doc:
+            self.assertIsNotNone(find_gmail_thread("find-no-load"))
+            self.assertIsNotNone(find_gmail_thread("no-such", ["no-load@x.com"]))
+            self.assertIsNone(find_gmail_thread("no-such", ["missing@x.com"]))
+        get_doc.assert_not_called()
 
 
 class TestCreateNewEmail(IntegrationTestCase):
@@ -297,9 +354,7 @@ class TestCreateNewEmail(IntegrationTestCase):
             frappe.db.get_value("Gmail Thread", thread.name, "modified"), last_email_at
         )
         # this mailbox's later emails in its thread find the same Gmail Thread
-        self.assertEqual(
-            find_gmail_thread("keep-modified-this-mailbox").name, thread.name
-        )
+        self.assertEqual(find_gmail_thread("keep-modified-this-mailbox"), thread.name)
 
     def test_records_mailbox_thread_id_when_user_already_involved(self):
         """The mailbox's Gmail thread id is recorded on the existing thread even if its user is already listed."""
@@ -318,9 +373,7 @@ class TestCreateNewEmail(IntegrationTestCase):
         email["threadId"] = "known-user-other-thread-id"
         with self.assertRaises(AlreadyExistsError):
             create_new_email(email, self.account)
-        self.assertEqual(
-            find_gmail_thread("known-user-other-thread-id").name, thread.name
-        )
+        self.assertEqual(find_gmail_thread("known-user-other-thread-id"), thread.name)
 
 
 class TestLockGmailThread(IntegrationTestCase):

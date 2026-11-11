@@ -1742,9 +1742,7 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
             frappe.db.get_value("Gmail Thread", other_thread.name, "modified"), modified
         )
         # this mailbox's later emails in its thread find the same Gmail Thread
-        self.assertEqual(
-            real_find_gmail_thread(f"t-this-{key}").name, other_thread.name
-        )
+        self.assertEqual(real_find_gmail_thread(f"t-this-{key}"), other_thread.name)
 
     def test_aggregates_involved_users_from_sender_recipients_and_account_owner(self):
         """update_involved_users is called with the set of sender + to + cc + bcc + the gmail_account's linked_user."""
@@ -1781,7 +1779,8 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
                     return_value=(mock_email, mock_email_object),
                 ),
                 patch(
-                    f"{GMAIL_THREAD_MODULE}.find_gmail_thread", return_value=mock_thread
+                    f"{GMAIL_THREAD_MODULE}.find_gmail_thread",
+                    return_value=mock_thread.name,
                 ),
                 patch(
                     f"{GMAIL_THREAD_MODULE}.lock_gmail_thread", return_value=mock_thread
@@ -1844,7 +1843,7 @@ class TestSyncMessageHandling(_GmailThreadTestCase):
                     ),
                     patch(
                         f"{GMAIL_THREAD_MODULE}.find_gmail_thread",
-                        return_value=mock_thread,
+                        return_value=mock_thread.name,
                     ),
                     patch(
                         f"{GMAIL_THREAD_MODULE}.lock_gmail_thread",
