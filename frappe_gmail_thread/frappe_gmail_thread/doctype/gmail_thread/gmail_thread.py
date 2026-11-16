@@ -479,7 +479,8 @@ def sync(user=None):
                         if not skip_unavailable(e, user, f"thread {thread_id}"):
                             raise
                         continue
-                    gmail_thread = find_gmail_thread(thread_id)
+                    thread_name = find_gmail_thread(thread_id)
+                    gmail_thread = None
                     involved_users = set()
                     email = None
                     for message in thread_data["messages"]:
@@ -491,13 +492,13 @@ def sync(user=None):
                             max_history_id = msg_history_id
                         rfc_message_id = get_rfc_message_id(message_headers)
                         if gmail_message_exists(message["id"], rfc_message_id):
-                            if not gmail_thread and rfc_message_id:
+                            if not thread_name and rfc_message_id:
                                 # thread ids are per mailbox: another mailbox may have imported it
-                                gmail_thread = find_gmail_thread(
+                                thread_name = find_gmail_thread(
                                     thread_id, [rfc_message_id]
                                 )
-                            if gmail_thread:
-                                gmail_thread = lock_gmail_thread(gmail_thread.name)
+                            if thread_name:
+                                gmail_thread = lock_gmail_thread(thread_name)
                                 participants = get_message_participants(message_headers)
                                 participants.add(gmail_account.linked_user)
                                 add_participants(gmail_thread, participants, thread_id)
@@ -526,7 +527,7 @@ def sync(user=None):
                             # releases the thread create_new_email locked
                             frappe.db.commit()  # nosemgrep
                             continue
-                        if not gmail_thread:
+                        if not thread_name:
                             email_message_id = email_object.message_id
                             email_references = email_object.mail.get("References")
                             if email_references:
@@ -536,11 +537,11 @@ def sync(user=None):
                                 ]
                             else:
                                 email_references = []
-                            gmail_thread = find_gmail_thread(
+                            thread_name = find_gmail_thread(
                                 thread_id, [email_message_id] + email_references
                             )
-                        if gmail_thread:
-                            gmail_thread = lock_gmail_thread(gmail_thread.name)
+                        if thread_name:
+                            gmail_thread = lock_gmail_thread(thread_name)
                             if thread_has_email(gmail_thread, email):
                                 # imported by another mailbox's sync while this one waited
                                 add_participants(
@@ -600,6 +601,8 @@ def sync(user=None):
                             thread_values,
                             update_modified=False,
                         )
+                        # the thread's later messages reload this thread
+                        thread_name = gmail_thread.name
                     # one transaction per thread: commit the thread's emails together
                     frappe.db.commit()  # nosemgrep
                 gmail_account.reload()
@@ -654,7 +657,7 @@ def sync(user=None):
                             if "DRAFT" in raw_email.get("labelIds", []):
                                 continue
                             thread_id = message["threadId"]
-                            gmail_thread = find_gmail_thread(thread_id)
+                            thread_name = find_gmail_thread(thread_id)
                             involved_users = set()
                             is_new_thread = False
                             try:
@@ -665,7 +668,7 @@ def sync(user=None):
                                 # releases the thread create_new_email locked
                                 frappe.db.commit()  # nosemgrep
                                 continue
-                            if not gmail_thread:
+                            if not thread_name:
                                 email_message_id = email_object.message_id
                                 email_references = email_object.mail.get("References")
                                 if email_references:
@@ -675,11 +678,11 @@ def sync(user=None):
                                     ]
                                 else:
                                     email_references = []
-                                gmail_thread = find_gmail_thread(
+                                thread_name = find_gmail_thread(
                                     thread_id, [email_message_id] + email_references
                                 )
-                            if gmail_thread:
-                                gmail_thread = lock_gmail_thread(gmail_thread.name)
+                            if thread_name:
+                                gmail_thread = lock_gmail_thread(thread_name)
                                 if thread_has_email(gmail_thread, email):
                                     # imported by another mailbox's sync while this one waited
                                     add_participants(
