@@ -154,13 +154,13 @@ def find_gmail_thread(
         fields=["email_message_id", "parent"],
         order_by="creation desc",
     )
-    # first match in message_ids order; for a repeated id, its newest row
+    # first match in message_ids order (ignoring case, as the query does); its newest row
     parent_by_message_id = {}
     for row in emails:
-        parent_by_message_id.setdefault(row.email_message_id, row.parent)
+        parent_by_message_id.setdefault(row.email_message_id.casefold(), row.parent)
     for message_id in message_ids:
-        if message_id in parent_by_message_id:
-            return parent_by_message_id[message_id]
+        if parent := parent_by_message_id.get(message_id.casefold()):
+            return parent
     return None
 
 

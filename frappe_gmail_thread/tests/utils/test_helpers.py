@@ -185,6 +185,8 @@ class TestFindGmailThread(IntegrationTestCase):
         )
         result = find_gmail_thread("no-such-thread", ["<msg-001@x.com>"])
         self.assertEqual(result, thread.name)
+        # ids match case-insensitively, as they do in the database
+        self.assertEqual(find_gmail_thread("no-id", ["<MSG-001@X.com>"]), thread.name)
 
     def test_returns_none_when_no_match(self):
         """find_gmail_thread returns None when neither the thread_id nor any message_id matches."""
