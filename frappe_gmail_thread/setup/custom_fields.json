@@ -46,6 +46,24 @@
       "label": "PubSub Topic",
       "mandatory_depends_on": "eval:doc.custom_gmail_sync_in_realtime == true;",
       "translatable": 1
+    },
+    {
+      "depends_on": "eval:doc.custom_gmail_sync_in_realtime == true;",
+      "description": "Optional shared secret for Pub/Sub push verification. When set, the subscription's push endpoint must be .../api/method/frappe_gmail_thread.api.pubsub.callback?token=<this value> and pushes without a matching token are rejected. Leave blank to accept pushes as before. Use Generate Token to create one and get the full URL.",
+      "fieldname": "custom_gmail_pubsub_token",
+      "fieldtype": "Password",
+      "insert_after": "custom_gmail_pubsub_topic",
+      "label": "PubSub Token",
+      "mandatory_depends_on": "",
+      "translatable": 0
+    },
+    {
+      "depends_on": "eval:doc.custom_gmail_sync_in_realtime == true;",
+      "fieldname": "custom_gmail_pubsub_generate_token",
+      "fieldtype": "Button",
+      "insert_after": "custom_gmail_pubsub_token",
+      "label": "Generate Token",
+      "translatable": 0
     }
   ]
 }

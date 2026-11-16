@@ -17,6 +17,7 @@ from frappe_gmail_thread.tests import (
 from frappe_gmail_thread.utils.sync_pause import pause_sync
 
 PUBSUB_MODULE = "frappe_gmail_thread.api.pubsub"
+PUBSUB_TOKEN = "test-pubsub-token"
 
 
 def _build_request(message_dict):
@@ -38,6 +39,59 @@ class TestPubsubCallback(IntegrationTestCase):
         set_password_field("Gmail Account", account.name, "refresh_token", "rt")
         cls.account = account.name
 
+    def setUp(self):
+        super().setUp()
+        # The push URL's ?token lands in form_dict; present a valid one by default so each
+        # test asserts its own behaviour rather than the token check.
+        previous = frappe.local.form_dict
+        frappe.local.form_dict = frappe._dict(token=PUBSUB_TOKEN)
+        self.addCleanup(setattr, frappe.local, "form_dict", previous)
+
+    def test_allows_push_when_no_token_configured(self):
+        """Backward compatible: with no PubSub Token set, a push is processed as before (the token check is skipped), so upgrading does not break an existing subscription."""
+        body = _build_request({"emailAddress": TEST_USER, "historyId": 500})
+        request = MagicMock()
+        request.get_data.return_value = body
+        frappe.db.set_value("User", TEST_USER, "user_type", "System User")
+        frappe.local.form_dict = frappe._dict()  # the push carries no ?token
+        with change_settings(
+            "Google Settings",
+            enable=1,
+            custom_gmail_sync_in_realtime=1,
+            custom_gmail_pubsub_topic="topic",
+            custom_gmail_pubsub_token="",
+        ):
+            with (
+                patch(f"{PUBSUB_MODULE}.frappe.request", request),
+                patch(f"{PUBSUB_MODULE}.is_job_enqueued", return_value=False),
+                patch(f"{PUBSUB_MODULE}.frappe.enqueue") as mock_enqueue,
+            ):
+                result = callback()
+        self.assertEqual(result, "OK")
+        mock_enqueue.assert_called_once()
+
+    def test_rejects_missing_or_wrong_token(self):
+        """callback refuses a push whose ?token is absent or does not match the configured PubSub Token, before any sync is queued."""
+        body = _build_request({"emailAddress": TEST_USER, "historyId": 100})
+        request = MagicMock()
+        request.get_data.return_value = body
+        with change_settings(
+            "Google Settings",
+            enable=1,
+            custom_gmail_sync_in_realtime=1,
+            custom_gmail_pubsub_topic="topic",
+            custom_gmail_pubsub_token=PUBSUB_TOKEN,
+        ):
+            with (
+                patch(f"{PUBSUB_MODULE}.frappe.request", request),
+                patch(f"{PUBSUB_MODULE}.frappe.enqueue") as mock_enqueue,
+            ):
+                for token in (None, "wrong"):
+                    frappe.local.form_dict = frappe._dict(token=token)
+                    with self.assertRaises(frappe.AuthenticationError):
+                        callback()
+        mock_enqueue.assert_not_called()
+
     def test_returns_ok_without_enqueue_when_google_settings_disabled(self):
         """callback returns 'OK' without enqueuing when Google Settings.enable=0."""
         body = _build_request({"emailAddress": TEST_USER, "historyId": 100})
@@ -48,6 +102,7 @@ class TestPubsubCallback(IntegrationTestCase):
             enable=0,
             custom_gmail_sync_in_realtime=1,
             custom_gmail_pubsub_topic="topic",
+            custom_gmail_pubsub_token=PUBSUB_TOKEN,
         ):
             with (
                 patch(f"{PUBSUB_MODULE}.frappe.request", request),
@@ -67,6 +122,7 @@ class TestPubsubCallback(IntegrationTestCase):
             enable=1,
             custom_gmail_sync_in_realtime=0,
             custom_gmail_pubsub_topic="topic",
+            custom_gmail_pubsub_token=PUBSUB_TOKEN,
         ):
             with (
                 patch(f"{PUBSUB_MODULE}.frappe.request", request),
@@ -106,6 +162,7 @@ class TestPubsubCallback(IntegrationTestCase):
             enable=1,
             custom_gmail_sync_in_realtime=1,
             custom_gmail_pubsub_topic="topic",
+            custom_gmail_pubsub_token=PUBSUB_TOKEN,
         ):
             with (
                 patch(f"{PUBSUB_MODULE}.frappe.request", request),
@@ -130,6 +187,7 @@ class TestPubsubCallback(IntegrationTestCase):
             enable=1,
             custom_gmail_sync_in_realtime=1,
             custom_gmail_pubsub_topic="topic",
+            custom_gmail_pubsub_token=PUBSUB_TOKEN,
         ):
             with (
                 patch(f"{PUBSUB_MODULE}.frappe.request", request),
@@ -150,6 +208,7 @@ class TestPubsubCallback(IntegrationTestCase):
             enable=1,
             custom_gmail_sync_in_realtime=1,
             custom_gmail_pubsub_topic="topic",
+            custom_gmail_pubsub_token=PUBSUB_TOKEN,
         ):
             with (
                 patch(f"{PUBSUB_MODULE}.frappe.request", request),
@@ -169,6 +228,7 @@ class TestPubsubCallback(IntegrationTestCase):
             enable=1,
             custom_gmail_sync_in_realtime=1,
             custom_gmail_pubsub_topic="topic",
+            custom_gmail_pubsub_token=PUBSUB_TOKEN,
         ):
             with (
                 patch(f"{PUBSUB_MODULE}.frappe.request", request),
@@ -214,6 +274,7 @@ class TestPubsubCallback(IntegrationTestCase):
             enable=1,
             custom_gmail_sync_in_realtime=1,
             custom_gmail_pubsub_topic="topic",
+            custom_gmail_pubsub_token=PUBSUB_TOKEN,
         ):
             with (
                 patch(f"{PUBSUB_MODULE}.frappe.request", request),
@@ -229,10 +290,15 @@ class TestPubsubCallbackRoute(FrappeAPITestCase):
     """Calls the endpoint through Frappe's request handling, where the HTTP method is enforced."""
 
     def test_accepts_post_from_guest(self):
-        """Pub/Sub push requests (POST, no session) reach the callback."""
-        response = self.post(
-            self.method("frappe_gmail_thread.api.pubsub.callback"), {"message": {}}
-        )
+        """Pub/Sub push requests (POST, no session) reach the callback.
+
+        The token check is bypassed here: it is covered by TestPubsubCallback, and this
+        test is about Frappe's request handling, not the site's Google Settings.
+        """
+        with patch(f"{PUBSUB_MODULE}.verify_push_token"):
+            response = self.post(
+                self.method("frappe_gmail_thread.api.pubsub.callback"), {"message": {}}
+            )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["message"], "OK")
 
